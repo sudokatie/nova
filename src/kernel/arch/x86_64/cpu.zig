@@ -131,6 +131,11 @@ pub fn inl(port: u16) u32 {
     );
 }
 
+/// I/O wait (small delay for I/O devices)
+pub fn io_wait() void {
+    outb(0x80, 0);
+}
+
 /// Load GDT - takes pointer to GDTR
 /// Note: Due to Zig 0.15 inline asm limitations, caller must ensure pointer is valid
 pub fn loadGDT(gdtr: *const GDTPointer) void {

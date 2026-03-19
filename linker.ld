@@ -11,6 +11,12 @@ SECTIONS
 {
     . = KERNEL_VIRT;
 
+    /* Limine requests section */
+    .limine_reqs ALIGN(4K) : AT(ADDR(.limine_reqs) - KERNEL_VIRT + KERNEL_PHYS)
+    {
+        KEEP(*(.limine_reqs))
+    }
+
     /* Text section - executable code */
     .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VIRT + KERNEL_PHYS)
     {

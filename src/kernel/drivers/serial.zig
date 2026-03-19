@@ -111,18 +111,18 @@ pub fn writeHex(value: u64) void {
     }
 }
 
-// Port I/O functions
+// Port I/O functions using inline assembly
 fn outb(port: u16, value: u8) void {
     asm volatile ("outb %[value], %[port]"
         :
         : [value] "{al}" (value),
-          [port] "N{dx}" (port),
+          [port] "{dx}" (port),
     );
 }
 
 fn inb(port: u16) u8 {
     return asm volatile ("inb %[port], %[result]"
         : [result] "={al}" (-> u8),
-        : [port] "N{dx}" (port),
+        : [port] "{dx}" (port),
     );
 }

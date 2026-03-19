@@ -3,22 +3,17 @@
 // This is the kernel entry point called by the Limine bootloader.
 // It sets up basic serial output and initializes kernel subsystems.
 
-const std = @import("std");
-
-// Limine bootloader protocol
 const limine = @import("limine.zig");
-
-// Serial port for early debug output
 const serial = @import("drivers/serial.zig");
 
 // Limine requests - these are filled in by the bootloader
-pub export var base_revision: limine.BaseRevision = .{ .revision = 2 };
-pub export var memory_map_request: limine.MemoryMapRequest = .{};
-pub export var hhdm_request: limine.HhdmRequest = .{};
-pub export var kernel_address_request: limine.KernelAddressRequest = .{};
+pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
+pub export var memory_map_request: limine.MemoryMapRequest linksection(".limine_reqs") = .{};
+pub export var hhdm_request: limine.HhdmRequest linksection(".limine_reqs") = .{};
+pub export var kernel_address_request: limine.KernelAddressRequest linksection(".limine_reqs") = .{};
 
 // Kernel entry point
-pub export fn kmain() callconv(.C) noreturn {
+export fn kmain() noreturn {
     // Initialize serial console for debug output
     serial.init();
 
@@ -84,7 +79,7 @@ fn halt() noreturn {
 }
 
 // Panic handler for Zig runtime
-pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
     serial.writeString("\n!!! KERNEL PANIC !!!\n");
     serial.writeString(msg);
     serial.writeString("\n");

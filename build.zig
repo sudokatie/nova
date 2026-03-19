@@ -13,16 +13,16 @@ pub fn build(b: *std.Build) void {
     // Kernel executable
     const kernel = b.addExecutable(.{
         .name = "nova",
-        .root_source_file = b.path("src/kernel/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .code_model = .kernel,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/kernel/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .code_model = .kernel,
+            .red_zone = false,
+            .stack_check = false,
+            .stack_protector = false,
+        }),
     });
-
-    // Disable features that don't work in kernel mode
-    kernel.root_module.red_zone = false;
-    kernel.root_module.stack_check = false;
-    kernel.root_module.stack_protector = .none;
 
     // Use custom linker script
     kernel.setLinkerScript(b.path("linker.ld"));
@@ -68,10 +68,13 @@ pub fn build(b: *std.Build) void {
     iso_step.dependOn(&iso_cmd.step);
 
     // Unit tests (run on host)
+    const host_target = b.standardTargetOptions(.{});
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/kernel/main.zig"),
-        .target = b.standardTargetOptions(.{}),
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/kernel/main.zig"),
+            .target = host_target,
+            .optimize = optimize,
+        }),
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);

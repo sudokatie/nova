@@ -4,11 +4,11 @@
 // The bootloader fills in responses to our requests.
 
 // Limine magic numbers
-pub const LIMINE_COMMON_MAGIC = [4]u64{ 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0, 0 };
+pub const LIMINE_COMMON_MAGIC: [2]u64 = .{ 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b };
 
 // Base revision - verifies protocol compatibility
 pub const BaseRevision = extern struct {
-    id: [4]u64 = LIMINE_COMMON_MAGIC,
+    id: [2]u64 = LIMINE_COMMON_MAGIC,
     revision: u64,
 
     pub fn is_supported(self: *const @This()) bool {
@@ -48,7 +48,7 @@ pub const MemoryMapResponse = extern struct {
 
 // Memory map request
 pub const MemoryMapRequest = extern struct {
-    id: [4]u64 = LIMINE_COMMON_MAGIC ++ [2]u64{ 0x67cf3d9d378a806f, 0xe304acdfc50c3c62 },
+    id: [4]u64 = LIMINE_COMMON_MAGIC ++ .{ 0x67cf3d9d378a806f, 0xe304acdfc50c3c62 },
     revision: u64 = 0,
     response: ?*MemoryMapResponse = null,
 };
@@ -61,7 +61,7 @@ pub const HhdmResponse = extern struct {
 
 // HHDM request
 pub const HhdmRequest = extern struct {
-    id: [4]u64 = LIMINE_COMMON_MAGIC ++ [2]u64{ 0x48dcf1cb8ad2b852, 0x63984e959a98244b },
+    id: [4]u64 = LIMINE_COMMON_MAGIC ++ .{ 0x48dcf1cb8ad2b852, 0x63984e959a98244b },
     revision: u64 = 0,
     response: ?*HhdmResponse = null,
 };
@@ -75,7 +75,7 @@ pub const KernelAddressResponse = extern struct {
 
 // Kernel address request
 pub const KernelAddressRequest = extern struct {
-    id: [4]u64 = LIMINE_COMMON_MAGIC ++ [2]u64{ 0x71ba76863cc55f63, 0xb2644a48c516a487 },
+    id: [4]u64 = LIMINE_COMMON_MAGIC ++ .{ 0x71ba76863cc55f63, 0xb2644a48c516a487 },
     revision: u64 = 0,
     response: ?*KernelAddressResponse = null,
 };

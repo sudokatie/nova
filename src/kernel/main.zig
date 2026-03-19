@@ -6,6 +6,7 @@
 const limine = @import("limine.zig");
 const console = @import("lib/console.zig");
 const panic_handler = @import("lib/panic.zig");
+const pmm = @import("mm/pmm.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -31,33 +32,38 @@ export fn kmain() noreturn {
     }
     console.log(.info, "Limine protocol verified", .{});
 
-    // Check memory map
-    if (memory_map_request.response) |memmap| {
-        console.log(.info, "Memory map: {} entries", .{memmap.entry_count});
-
-        // Print memory summary
-        var total_usable: u64 = 0;
-        for (memmap.entries()[0..memmap.entry_count]) |entry| {
-            if (entry.kind == .usable) {
-                total_usable += entry.length;
-            }
-        }
-        console.log(.info, "Usable memory: {} MB", .{total_usable / 1024 / 1024});
-    } else {
+    // Get memory map
+    const memmap = memory_map_request.response orelse {
         panic_handler.panic_msg("No memory map from bootloader");
-    }
+    };
+    console.log(.info, "Memory map: {} entries", .{memmap.entry_count});
 
-    // Check HHDM (Higher Half Direct Map)
-    if (hhdm_request.response) |hhdm| {
-        console.log(.info, "HHDM offset: {x}", .{hhdm.offset});
-    } else {
+    // Get HHDM
+    const hhdm = hhdm_request.response orelse {
         panic_handler.panic_msg("No HHDM from bootloader");
-    }
+    };
+    console.log(.info, "HHDM offset: {x}", .{hhdm.offset});
 
     // Note: GDT/IDT initialization deferred
     // Limine sets up valid GDT/IDT that we can use for now
-    // Custom GDT/IDT requires fixing Zig 0.15 inline asm compatibility
-    console.log(.info, "Using Limine GDT/IDT (custom init deferred)", .{});
+    console.log(.info, "Using Limine GDT/IDT", .{});
+
+    // Initialize physical memory manager
+    console.log(.info, "Initializing PMM...", .{});
+    pmm.init(memmap, hhdm);
+
+    // Test PMM
+    console.log(.debug, "PMM test: allocating pages...", .{});
+    if (pmm.allocPage()) |page1| {
+        console.log(.debug, "  Allocated page at {x}", .{page1});
+        if (pmm.allocPage()) |page2| {
+            console.log(.debug, "  Allocated page at {x}", .{page2});
+            pmm.freePage(page1);
+            pmm.freePage(page2);
+            console.log(.debug, "  Freed both pages", .{});
+        }
+    }
+    console.log(.info, "PMM test passed", .{});
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});

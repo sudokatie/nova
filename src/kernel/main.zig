@@ -4,7 +4,8 @@
 // It sets up basic serial output and initializes kernel subsystems.
 
 const limine = @import("limine.zig");
-const serial = @import("drivers/serial.zig");
+const console = @import("lib/console.zig");
+const panic_handler = @import("lib/panic.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -14,28 +15,25 @@ pub export var kernel_address_request: limine.KernelAddressRequest linksection("
 
 // Kernel entry point
 export fn kmain() noreturn {
-    // Initialize serial console for debug output
-    serial.init();
+    // Initialize console for debug output
+    console.init();
 
     // Print boot message
-    serial.writeString("\n");
-    serial.writeString("=====================================\n");
-    serial.writeString("  Nova Microkernel v0.1.0\n");
-    serial.writeString("=====================================\n");
-    serial.writeString("\n");
+    console.println("", .{});
+    console.println("=====================================", .{});
+    console.println("  Nova Microkernel v0.1.0", .{});
+    console.println("=====================================", .{});
+    console.println("", .{});
 
     // Verify Limine protocol
     if (!base_revision.is_supported()) {
-        serial.writeString("ERROR: Limine base revision not supported\n");
-        halt();
+        panic_handler.panic_msg("Limine base revision not supported");
     }
-    serial.writeString("[OK] Limine protocol verified\n");
+    console.log(.info, "Limine protocol verified", .{});
 
     // Check memory map
     if (memory_map_request.response) |memmap| {
-        serial.writeString("[OK] Memory map received: ");
-        serial.writeInt(memmap.entry_count);
-        serial.writeString(" entries\n");
+        console.log(.info, "Memory map: {} entries", .{memmap.entry_count});
 
         // Print memory summary
         var total_usable: u64 = 0;
@@ -44,44 +42,25 @@ export fn kmain() noreturn {
                 total_usable += entry.length;
             }
         }
-        serial.writeString("     Usable memory: ");
-        serial.writeInt(total_usable / 1024 / 1024);
-        serial.writeString(" MB\n");
+        console.log(.info, "Usable memory: {} MB", .{total_usable / 1024 / 1024});
     } else {
-        serial.writeString("ERROR: No memory map from bootloader\n");
-        halt();
+        panic_handler.panic_msg("No memory map from bootloader");
     }
 
     // Check HHDM (Higher Half Direct Map)
     if (hhdm_request.response) |hhdm| {
-        serial.writeString("[OK] HHDM offset: 0x");
-        serial.writeHex(hhdm.offset);
-        serial.writeString("\n");
+        console.log(.info, "HHDM offset: {x}", .{hhdm.offset});
     } else {
-        serial.writeString("ERROR: No HHDM from bootloader\n");
-        halt();
+        panic_handler.panic_msg("No HHDM from bootloader");
     }
 
-    serial.writeString("\n");
-    serial.writeString("Hello from Nova kernel!\n");
-    serial.writeString("Boot successful. System halted.\n");
+    console.println("", .{});
+    console.println("Hello from Nova kernel!", .{});
+    console.println("Boot successful. System halted.", .{});
 
     // Halt - we don't have a scheduler yet
-    halt();
+    panic_handler.halt();
 }
 
-fn halt() noreturn {
-    // Disable interrupts and halt
-    asm volatile ("cli");
-    while (true) {
-        asm volatile ("hlt");
-    }
-}
-
-// Panic handler for Zig runtime
-pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    serial.writeString("\n!!! KERNEL PANIC !!!\n");
-    serial.writeString(msg);
-    serial.writeString("\n");
-    halt();
-}
+// Zig builtin panic handler - forward to our panic module
+pub const panic = panic_handler.zig_panic;

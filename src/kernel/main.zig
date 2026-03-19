@@ -12,6 +12,7 @@ const heap = @import("mm/heap.zig");
 const timer = @import("drivers/timer.zig");
 const process = @import("proc/process.zig");
 const thread = @import("proc/thread.zig");
+const scheduler = @import("proc/scheduler.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -133,6 +134,9 @@ export fn kmain() noreturn {
     process.init();
     thread.init();
 
+    // Initialize scheduler
+    scheduler.init();
+
     // Test: create a process and thread
     console.log(.debug, "Process test: creating process...", .{});
     if (process.create(0)) |proc| {
@@ -141,8 +145,14 @@ export fn kmain() noreturn {
 
         if (thread.create(proc)) |t| {
             console.log(.debug, "  Created thread {} (stack at {x})", .{ t.tid, t.kernel_stack_top });
+            // Add to run queue
+            scheduler.enqueue(t);
         }
-        console.log(.info, "Process test passed: {} processes, {} threads", .{ process.getCount(), thread.getCount() });
+        console.log(.info, "Process test passed: {} processes, {} threads, {} ready", .{
+            process.getCount(),
+            thread.getCount(),
+            scheduler.getReadyCount(),
+        });
     }
 
     console.println("", .{});

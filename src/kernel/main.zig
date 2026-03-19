@@ -10,6 +10,8 @@ const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const heap = @import("mm/heap.zig");
 const timer = @import("drivers/timer.zig");
+const process = @import("proc/process.zig");
+const thread = @import("proc/thread.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -125,6 +127,23 @@ export fn kmain() noreturn {
     // Note: Timer interrupts won't fire until IDT is properly set up
     console.log(.info, "Initializing timer...", .{});
     timer.init(100); // 100 Hz
+
+    // Initialize process and thread subsystems
+    console.log(.info, "Initializing process management...", .{});
+    process.init();
+    thread.init();
+
+    // Test: create a process and thread
+    console.log(.debug, "Process test: creating process...", .{});
+    if (process.create(0)) |proc| {
+        proc.setName("init");
+        console.log(.debug, "  Created process {} ({})", .{ proc.pid, proc.getName() });
+
+        if (thread.create(proc)) |t| {
+            console.log(.debug, "  Created thread {} (stack at {x})", .{ t.tid, t.kernel_stack_top });
+        }
+        console.log(.info, "Process test passed: {} processes, {} threads", .{ process.getCount(), thread.getCount() });
+    }
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});

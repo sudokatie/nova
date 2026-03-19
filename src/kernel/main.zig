@@ -7,6 +7,7 @@ const limine = @import("limine.zig");
 const console = @import("lib/console.zig");
 const panic_handler = @import("lib/panic.zig");
 const pmm = @import("mm/pmm.zig");
+const vmm = @import("mm/vmm.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -64,6 +65,54 @@ export fn kmain() noreturn {
         }
     }
     console.log(.info, "PMM test passed", .{});
+
+    // Initialize virtual memory manager
+    console.log(.info, "Initializing VMM...", .{});
+    vmm.init();
+
+    // Test VMM
+    console.log(.debug, "VMM test: mapping pages...", .{});
+    const kernel_space = vmm.getKernelSpace();
+
+    // Test address translation (existing mappings)
+    const test_virt: u64 = 0xFFFFFFFF80000000; // Kernel base
+    if (kernel_space.translate(test_virt)) |phys| {
+        console.log(.debug, "  Kernel base {x} -> {x}", .{ test_virt, phys });
+    } else {
+        console.log(.warn, "  Kernel base not mapped", .{});
+    }
+
+    // Test mapping a new page
+    const test_addr: u64 = 0xFFFFFFFF90000000; // Arbitrary kernel address
+    if (pmm.allocPage()) |phys_page| {
+        const flags = vmm.MapFlags{ .writable = true };
+        if (kernel_space.mapPage(test_addr, phys_page, flags)) {
+            console.log(.debug, "  Mapped {x} -> {x}", .{ test_addr, phys_page });
+
+            // Verify mapping
+            if (kernel_space.translate(test_addr)) |resolved| {
+                if (resolved == phys_page) {
+                    console.log(.debug, "  Translation verified", .{});
+                } else {
+                    console.log(.warn, "  Translation mismatch: got {x}", .{resolved});
+                }
+            }
+
+            // Test write/read
+            const ptr: *volatile u64 = @ptrFromInt(test_addr);
+            ptr.* = 0xDEADBEEF_CAFEBABE;
+            const read_back = ptr.*;
+            if (read_back == 0xDEADBEEF_CAFEBABE) {
+                console.log(.debug, "  Write/read verified", .{});
+            }
+
+            // Unmap and free
+            _ = kernel_space.unmapPage(test_addr);
+            pmm.freePage(phys_page);
+            console.log(.debug, "  Unmapped and freed", .{});
+        }
+    }
+    console.log(.info, "VMM test passed", .{});
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});

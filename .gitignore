@@ -1,0 +1,8 @@
+zig-cache/
+zig-out/
+.zig-cache/
+iso_root/
+*.iso
+*.o
+*.elf
+.DS_Store

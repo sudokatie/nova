@@ -145,31 +145,37 @@ pub fn init() void {
 /// Set up the TSS descriptor in the GDT
 fn setTSSDescriptor() void {
     const tss_addr = @intFromPtr(&tss);
-    const tss_size = @sizeOf(TSS) - 1;
+    const tss_size: u20 = @sizeOf(TSS) - 1;
 
     // TSS is a 16-byte system descriptor in long mode
-    // We treat gdt[5] and gdt[6] as a single SystemDescriptor
-    const sys_desc: *SystemDescriptor = @ptrCast(&gdt[5]);
-    sys_desc.* = .{
+    // Set low 8 bytes
+    gdt[5] = .{
         .limit_low = @truncate(tss_size),
         .base_low = @truncate(tss_addr),
         .base_mid = @truncate(tss_addr >> 16),
         .access = ACCESS_TSS_AVAILABLE,
         .flags_limit_high = @truncate(tss_size >> 16),
         .base_high = @truncate(tss_addr >> 24),
-        .base_upper = @truncate(tss_addr >> 32),
-        .reserved = 0,
+    };
+    // Set high 8 bytes (upper base and reserved)
+    gdt[6] = .{
+        .limit_low = @truncate(tss_addr >> 32),
+        .base_low = @truncate(tss_addr >> 48),
+        .base_mid = 0,
+        .access = 0,
+        .flags_limit_high = 0,
+        .base_high = 0,
     };
 }
 
 /// Reload segment registers after loading GDT
 fn reloadSegments() void {
-    // Reload CS via far jump
+    // Reload CS via far return
     asm volatile (
         \\push $0x08
         \\lea 1f(%%rip), %%rax
         \\push %%rax
-        \\lretq
+        \\.byte 0x48, 0xcb
         \\1:
     );
 

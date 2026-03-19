@@ -125,17 +125,17 @@ pub fn inl(port: u16) u32 {
 
 /// Load GDT
 pub fn loadGDT(gdtr: *const GDTPointer) void {
-    asm volatile ("lgdt (%[gdtr])"
+    asm volatile ("lgdt %[gdtr]"
         :
-        : [gdtr] "r" (gdtr),
+        : [gdtr] "*m" (gdtr),
     );
 }
 
 /// Load IDT
 pub fn loadIDT(idtr: *const IDTPointer) void {
-    asm volatile ("lidt (%[idtr])"
+    asm volatile ("lidt %[idtr]"
         :
-        : [idtr] "r" (idtr),
+        : [idtr] "*m" (idtr),
     );
 }
 
@@ -176,7 +176,6 @@ pub fn invlpg(addr: u64) void {
     asm volatile ("invlpg (%[addr])"
         :
         : [addr] "r" (addr),
-        : "memory"
     );
 }
 

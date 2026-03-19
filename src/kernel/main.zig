@@ -54,6 +54,9 @@ export fn kmain() noreturn {
         panic_handler.panic_msg("No HHDM from bootloader");
     }
 
+    // TODO: Initialize GDT (using Limine's for now)
+    console.log(.info, "Using Limine GDT/IDT", .{});
+
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});
     console.println("Boot successful. System halted.", .{});

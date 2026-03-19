@@ -61,9 +61,9 @@ fn printArg(arg: anytype) void {
     switch (info) {
         .int, .comptime_int => serial.writeInt(@intCast(arg)),
         .pointer => |ptr| {
-            if (ptr.size == .Slice and ptr.child == u8) {
+            if (ptr.size == .slice and ptr.child == u8) {
                 serial.writeString(arg);
-            } else if (ptr.size == .One) {
+            } else if (ptr.size == .one) {
                 serial.writeString("0x");
                 serial.writeHex(@intFromPtr(arg));
             } else {
@@ -112,7 +112,7 @@ fn printArgWithSpec(arg: anytype, spec: u8) void {
         's' => {
             if (info == .pointer) {
                 const ptr = info.pointer;
-                if (ptr.size == .Slice and ptr.child == u8) {
+                if (ptr.size == .slice and ptr.child == u8) {
                     serial.writeString(arg);
                 } else {
                     printArg(arg);

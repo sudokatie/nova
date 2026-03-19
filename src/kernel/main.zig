@@ -8,6 +8,7 @@ const console = @import("lib/console.zig");
 const panic_handler = @import("lib/panic.zig");
 const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
+const heap = @import("mm/heap.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -113,6 +114,11 @@ export fn kmain() noreturn {
         }
     }
     console.log(.info, "VMM test passed", .{});
+
+    // Initialize kernel heap
+    console.log(.info, "Initializing heap...", .{});
+    heap.init();
+    heap.test_heap();
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});

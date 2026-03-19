@@ -22,9 +22,11 @@ pub fn enableInterrupts() void {
 
 /// Read CR0 register
 pub fn readCR0() u64 {
-    return asm volatile ("mov %%cr0, %[result]"
-        : [result] "=r" (-> u64),
+    var result: u64 = undefined;
+    asm volatile ("mov %%cr0, %[result]"
+        : [result] "=r" (result),
     );
+    return result;
 }
 
 /// Write CR0 register
@@ -37,16 +39,20 @@ pub fn writeCR0(value: u64) void {
 
 /// Read CR2 register (page fault address)
 pub fn readCR2() u64 {
-    return asm volatile ("mov %%cr2, %[result]"
-        : [result] "=r" (-> u64),
+    var result: u64 = undefined;
+    asm volatile ("mov %%cr2, %[result]"
+        : [result] "=r" (result),
     );
+    return result;
 }
 
 /// Read CR3 register (page table base)
 pub fn readCR3() u64 {
-    return asm volatile ("mov %%cr3, %[result]"
-        : [result] "=r" (-> u64),
+    var result: u64 = undefined;
+    asm volatile ("mov %%cr3, %[result]"
+        : [result] "=r" (result),
     );
+    return result;
 }
 
 /// Write CR3 register (switches address space)
@@ -59,9 +65,11 @@ pub fn writeCR3(value: u64) void {
 
 /// Read CR4 register
 pub fn readCR4() u64 {
-    return asm volatile ("mov %%cr4, %[result]"
-        : [result] "=r" (-> u64),
+    var result: u64 = undefined;
+    asm volatile ("mov %%cr4, %[result]"
+        : [result] "=r" (result),
     );
+    return result;
 }
 
 /// Write CR4 register
@@ -123,19 +131,20 @@ pub fn inl(port: u16) u32 {
     );
 }
 
-/// Load GDT
+/// Load GDT - takes pointer to GDTR
+/// Note: Due to Zig 0.15 inline asm limitations, caller must ensure pointer is valid
 pub fn loadGDT(gdtr: *const GDTPointer) void {
     asm volatile ("lgdt %[gdtr]"
         :
-        : [gdtr] "*m" (gdtr),
+        : [gdtr] "m" (gdtr.*),
     );
 }
 
-/// Load IDT
+/// Load IDT - takes pointer to IDTR
 pub fn loadIDT(idtr: *const IDTPointer) void {
     asm volatile ("lidt %[idtr]"
         :
-        : [idtr] "*m" (idtr),
+        : [idtr] "m" (idtr.*),
     );
 }
 
@@ -173,9 +182,9 @@ pub fn writeMSR(msr: u32, value: u64) void {
 
 /// Invalidate TLB entry for address
 pub fn invlpg(addr: u64) void {
-    asm volatile ("invlpg (%[addr])"
+    asm volatile ("invlpg (%%rax)"
         :
-        : [addr] "r" (addr),
+        : [addr] "{rax}" (addr),
     );
 }
 

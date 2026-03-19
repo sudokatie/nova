@@ -54,8 +54,10 @@ export fn kmain() noreturn {
         panic_handler.panic_msg("No HHDM from bootloader");
     }
 
-    // TODO: Initialize GDT (using Limine's for now)
-    console.log(.info, "Using Limine GDT/IDT", .{});
+    // Note: GDT/IDT initialization deferred
+    // Limine sets up valid GDT/IDT that we can use for now
+    // Custom GDT/IDT requires fixing Zig 0.15 inline asm compatibility
+    console.log(.info, "Using Limine GDT/IDT (custom init deferred)", .{});
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});

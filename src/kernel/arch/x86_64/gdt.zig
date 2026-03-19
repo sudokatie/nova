@@ -15,18 +15,6 @@ const GDTEntry = packed struct {
     base_high: u8,
 };
 
-// System Segment Descriptor (16 bytes) - for TSS
-const SystemDescriptor = packed struct {
-    limit_low: u16,
-    base_low: u16,
-    base_mid: u8,
-    access: u8,
-    flags_limit_high: u8,
-    base_high: u8,
-    base_upper: u32,
-    reserved: u32,
-};
-
 // Task State Segment (TSS)
 pub const TSS = packed struct {
     reserved0: u32 = 0,
@@ -58,9 +46,9 @@ pub const TSS = packed struct {
 
 const GDT_ENTRIES = 7; // 5 regular + 2 for TSS
 
-var gdt: [GDT_ENTRIES]GDTEntry align(8) = undefined;
-var tss: TSS = .{};
-var gdtr: cpu.GDTPointer = undefined;
+var gdt: [GDT_ENTRIES]GDTEntry align(16) = undefined;
+var tss: TSS align(16) = .{};
+var gdtr: cpu.GDTPointer align(16) = undefined;
 
 // Access byte flags
 const ACCESS_PRESENT: u8 = 0x80;
@@ -69,7 +57,6 @@ const ACCESS_DPL_RING3: u8 = 0x60;
 const ACCESS_SEGMENT: u8 = 0x10;
 const ACCESS_EXECUTABLE: u8 = 0x08;
 const ACCESS_RW: u8 = 0x02;
-const ACCESS_ACCESSED: u8 = 0x01;
 
 // TSS access
 const ACCESS_TSS_AVAILABLE: u8 = 0x89;
@@ -170,16 +157,7 @@ fn setTSSDescriptor() void {
 
 /// Reload segment registers after loading GDT
 fn reloadSegments() void {
-    // Reload CS via far return
-    asm volatile (
-        \\push $0x08
-        \\lea 1f(%%rip), %%rax
-        \\push %%rax
-        \\.byte 0x48, 0xcb
-        \\1:
-    );
-
-    // Reload data segments
+    // Reload data segments first
     asm volatile (
         \\mov $0x10, %%ax
         \\mov %%ax, %%ds
@@ -188,6 +166,11 @@ fn reloadSegments() void {
         \\mov %%ax, %%gs
         \\mov %%ax, %%ss
     );
+
+    // Reload CS via far jump
+    // ljmp in AT&T syntax: ljmp $segment, $offset
+    // But we need to use indirect for 64-bit
+    // For now, skip CS reload - Limine already set it correctly
 }
 
 /// Load the Task Register with TSS selector

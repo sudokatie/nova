@@ -57,14 +57,20 @@ nova/
 
 ## Status
 
-Work in progress. Currently implementing:
-- [x] Boot to serial output
-- [ ] GDT/IDT setup
-- [ ] Physical memory manager
-- [ ] Virtual memory manager
-- [ ] Process scheduler
-- [ ] System calls
-- [ ] Userspace programs
+v0.1.0 complete. All core subsystems implemented:
+- [x] Limine boot protocol
+- [x] Serial console and panic handler
+- [x] Physical memory manager (bitmap allocator)
+- [x] Virtual memory manager (4-level paging)
+- [x] Kernel heap (slab allocator)
+- [x] APIC timer
+- [x] Process and thread management
+- [x] Priority scheduler with preemption
+- [x] System calls (exit, print, getpid, mmap, etc.)
+- [x] IPC message passing
+- [x] ELF64 loader
+- [x] Userspace runtime (libnova)
+- [x] Init process and shell
 
 ## Philosophy
 

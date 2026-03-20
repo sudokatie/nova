@@ -13,6 +13,7 @@ const timer = @import("drivers/timer.zig");
 const process = @import("proc/process.zig");
 const thread = @import("proc/thread.zig");
 const scheduler = @import("proc/scheduler.zig");
+const syscall = @import("arch/x86_64/syscall.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -136,6 +137,11 @@ export fn kmain() noreturn {
 
     // Initialize scheduler
     scheduler.init();
+
+    // Initialize syscall interface
+    console.log(.info, "Initializing syscall interface...", .{});
+    syscall.init();
+    syscall.testDispatch();
 
     // Test: create a process and thread
     console.log(.debug, "Process test: creating process...", .{});

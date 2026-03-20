@@ -125,6 +125,11 @@ fn printArgWithSpec(arg: anytype, spec: u8) void {
     }
 }
 
+/// Write a single character
+pub fn putChar(c: u8) void {
+    serial.writeByte(c);
+}
+
 /// Log levels
 pub const Level = enum {
     debug,

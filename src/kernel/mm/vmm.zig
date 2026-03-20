@@ -303,3 +303,258 @@ pub fn allocPages(space: *AddressSpace, virt_start: u64, num_pages: u64, flags: 
     }
     return true;
 }
+
+// ============= Copy-on-Write Support =============
+
+/// Page reference counts for COW
+const MAX_COW_PAGES: usize = 16384;
+var cow_refcounts: [MAX_COW_PAGES]u16 = [_]u16{0} ** MAX_COW_PAGES;
+
+/// Get COW index for a physical page
+fn cowIndex(phys: u64) ?usize {
+    const page_num = phys / PAGE_SIZE;
+    if (page_num < MAX_COW_PAGES) {
+        return @intCast(page_num);
+    }
+    return null;
+}
+
+/// Increment COW reference count
+pub fn cowRef(phys: u64) void {
+    if (cowIndex(phys)) |idx| {
+        if (cow_refcounts[idx] < 65535) {
+            cow_refcounts[idx] += 1;
+        }
+    }
+}
+
+/// Decrement COW reference count
+pub fn cowUnref(phys: u64) void {
+    if (cowIndex(phys)) |idx| {
+        if (cow_refcounts[idx] > 0) {
+            cow_refcounts[idx] -= 1;
+        }
+    }
+}
+
+/// Get COW reference count
+pub fn cowCount(phys: u64) u16 {
+    if (cowIndex(phys)) |idx| {
+        return cow_refcounts[idx];
+    }
+    return 0;
+}
+
+/// Check if page is COW (shared and read-only)
+pub fn isCowPage(space: *AddressSpace, virt: u64) bool {
+    if (space.translate(virt)) |phys| {
+        // Check if mapped read-only and has multiple refs
+        const indices = paging.getIndices(virt);
+        const pml4: *paging.Table = @ptrFromInt(pmm.physToVirt(space.pml4_phys));
+        const pml4e = pml4.getEntry(indices.pml4);
+        if (!pml4e.isPresent()) return false;
+
+        const pdpt: *paging.Table = @ptrFromInt(pmm.physToVirt(pml4e.getPhysAddr()));
+        const pdpte = pdpt.getEntry(indices.pdpt);
+        if (!pdpte.isPresent()) return false;
+
+        const pd: *paging.Table = @ptrFromInt(pmm.physToVirt(pdpte.getPhysAddr()));
+        const pde = pd.getEntry(indices.pd);
+        if (!pde.isPresent()) return false;
+
+        const pt: *paging.Table = @ptrFromInt(pmm.physToVirt(pde.getPhysAddr()));
+        const pte = pt.getEntry(indices.pt);
+
+        // COW page: present, not writable, has COW bit set
+        if (pte.isPresent() and !pte.isWritable()) {
+            return cowCount(phys) > 1;
+        }
+    }
+    return false;
+}
+
+/// Handle COW page fault - copy page and make it writable
+pub fn handleCowFault(space: *AddressSpace, virt: u64) bool {
+    const old_phys = space.translate(virt) orelse return false;
+
+    // Allocate new page
+    const new_phys = pmm.allocPage() orelse return false;
+
+    // Copy contents
+    const src: [*]const u8 = @ptrFromInt(pmm.physToVirt(old_phys));
+    const dst: [*]u8 = @ptrFromInt(pmm.physToVirt(new_phys));
+    for (0..PAGE_SIZE) |i| {
+        dst[i] = src[i];
+    }
+
+    // Unmap old, map new with write permissions
+    _ = space.unmapPage(virt);
+    const flags = MapFlags{ .writable = true, .user = true };
+    if (!space.mapPage(virt, new_phys, flags)) {
+        pmm.freePage(new_phys);
+        return false;
+    }
+
+    // Decrement ref count on old page
+    cowUnref(old_phys);
+
+    // Free old page if no more references
+    if (cowCount(old_phys) == 0) {
+        pmm.freePage(old_phys);
+    }
+
+    console.log(.debug, "VMM: COW fault handled at {x}", .{virt});
+    return true;
+}
+
+/// Fork an address space (COW copy)
+pub fn forkAddressSpace(dst: *AddressSpace, src: *AddressSpace) bool {
+    // Copy user space pages as COW (entries 0-255 in PML4)
+    const src_pml4: *paging.Table = @ptrFromInt(pmm.physToVirt(src.pml4_phys));
+
+    for (0..256) |pml4_idx| {
+        const pml4e = src_pml4.getEntry(@intCast(pml4_idx));
+        if (!pml4e.isPresent()) continue;
+
+        // Walk PDPT
+        const pdpt: *paging.Table = @ptrFromInt(pmm.physToVirt(pml4e.getPhysAddr()));
+        for (0..512) |pdpt_idx| {
+            const pdpte = pdpt.getEntry(@intCast(pdpt_idx));
+            if (!pdpte.isPresent()) continue;
+
+            // Walk PD
+            const pd: *paging.Table = @ptrFromInt(pmm.physToVirt(pdpte.getPhysAddr()));
+            for (0..512) |pd_idx| {
+                const pde = pd.getEntry(@intCast(pd_idx));
+                if (!pde.isPresent()) continue;
+
+                // Walk PT
+                const pt: *paging.Table = @ptrFromInt(pmm.physToVirt(pde.getPhysAddr()));
+                for (0..512) |pt_idx| {
+                    const pte = pt.getEntry(@intCast(pt_idx));
+                    if (!pte.isPresent()) continue;
+
+                    const phys = pte.getPhysAddr();
+                    const virt = (@as(u64, pml4_idx) << 39) |
+                        (@as(u64, pdpt_idx) << 30) |
+                        (@as(u64, pd_idx) << 21) |
+                        (@as(u64, pt_idx) << 12);
+
+                    // Mark both source and dest as read-only (COW)
+                    const cow_flags = MapFlags{ .writable = false, .user = true };
+
+                    // Remove write permission from source
+                    _ = src.unmapPage(virt);
+                    _ = src.mapPage(virt, phys, cow_flags);
+
+                    // Map same page in dest as read-only
+                    _ = dst.mapPage(virt, phys, cow_flags);
+
+                    // Increment reference count
+                    cowRef(phys);
+                    cowRef(phys); // Once for each mapping
+                }
+            }
+        }
+    }
+
+    // Copy kernel mappings (not COW - shared directly)
+    dst.cloneKernelMappings(src);
+
+    console.log(.debug, "VMM: Address space forked with COW", .{});
+    return true;
+}
+
+// ============= Demand Paging Support =============
+
+/// Demand page tracking - pages that should be allocated on first access
+const MAX_DEMAND_REGIONS: usize = 64;
+
+pub const DemandRegion = struct {
+    start: u64,
+    end: u64,
+    flags: MapFlags,
+    active: bool,
+
+    pub fn init() DemandRegion {
+        return .{ .start = 0, .end = 0, .flags = .{}, .active = false };
+    }
+};
+
+var demand_regions: [MAX_DEMAND_REGIONS]DemandRegion = [_]DemandRegion{DemandRegion.init()} ** MAX_DEMAND_REGIONS;
+
+/// Register a demand-paged region
+pub fn registerDemandRegion(start: u64, size: u64, flags: MapFlags) bool {
+    for (&demand_regions) |*r| {
+        if (!r.active) {
+            r.start = start;
+            r.end = start + size;
+            r.flags = flags;
+            r.active = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Check if address is in a demand-paged region
+pub fn getDemandRegion(addr: u64) ?*DemandRegion {
+    for (&demand_regions) |*r| {
+        if (r.active and addr >= r.start and addr < r.end) {
+            return r;
+        }
+    }
+    return null;
+}
+
+/// Handle demand page fault - allocate page on first access
+pub fn handleDemandFault(space: *AddressSpace, fault_addr: u64) bool {
+    const region = getDemandRegion(fault_addr) orelse return false;
+
+    const page_addr = fault_addr & ~@as(u64, PAGE_SIZE - 1);
+
+    // Allocate and map the page
+    const phys = pmm.allocPage() orelse return false;
+
+    if (!space.mapPage(page_addr, phys, region.flags)) {
+        pmm.freePage(phys);
+        return false;
+    }
+
+    // Zero the new page
+    const page: [*]u8 = @ptrFromInt(pmm.physToVirt(phys));
+    for (0..PAGE_SIZE) |i| {
+        page[i] = 0;
+    }
+
+    console.log(.debug, "VMM: Demand fault handled at {x}", .{fault_addr});
+    return true;
+}
+
+/// Handle page fault (entry point from IDT)
+pub fn handlePageFault(fault_addr: u64, error_code: u64) bool {
+    const space = getKernelSpace(); // TODO: get current process space
+
+    // Error code bits:
+    // bit 0: present (1 = protection violation, 0 = not present)
+    // bit 1: write (1 = write, 0 = read)
+    // bit 2: user (1 = user mode, 0 = supervisor)
+    const is_present = (error_code & 1) != 0;
+    const is_write = (error_code & 2) != 0;
+
+    if (is_present and is_write) {
+        // Write to read-only page - might be COW
+        if (isCowPage(space, fault_addr)) {
+            return handleCowFault(space, fault_addr);
+        }
+    } else if (!is_present) {
+        // Page not present - might be demand paging
+        if (getDemandRegion(fault_addr) != null) {
+            return handleDemandFault(space, fault_addr);
+        }
+    }
+
+    // Unhandled fault
+    console.log(.err, "VMM: Unhandled page fault at {x}, error={x}", .{ fault_addr, error_code });
+    return false;
+}

@@ -89,6 +89,8 @@ fn registerDefaults() void {
     register(SYS_DEBUG_PRINT, &sysDebugPrint);
     register(SYS_GETPID, &sysGetpid);
     register(SYS_GETTID, &sysGettid);
+    register(SYS_MMAP, &sysMmap);
+    register(SYS_MUNMAP, &sysMunmap);
     register(SYS_YIELD, &sysYield);
 }
 
@@ -179,6 +181,53 @@ fn sysYield(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     const scheduler = @import("../../proc/scheduler.zig");
     scheduler.yield();
     return 0;
+}
+
+fn sysMmap(addr: u64, length: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const vmm = @import("../../mm/vmm.zig");
+    
+    // Calculate number of pages needed
+    const page_size: u64 = 4096;
+    const num_pages = (length + page_size - 1) / page_size;
+    
+    // Get current process address space
+    if (context.getCurrent()) |thread| {
+        if (thread.process.address_space) |*space| {
+            // Allocate and map pages
+            const map_flags = vmm.MapFlags{ .writable = true, .user = true };
+            if (vmm.allocPages(space, addr, num_pages, map_flags)) {
+                return @intCast(addr);
+            }
+        }
+    }
+    
+    return -1; // ENOMEM
+}
+
+fn sysMunmap(addr: u64, length: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const pmm = @import("../../mm/pmm.zig");
+    
+    // Calculate number of pages
+    const page_size: u64 = 4096;
+    const num_pages = (length + page_size - 1) / page_size;
+    
+    // Get current process address space
+    if (context.getCurrent()) |thread| {
+        if (thread.process.address_space) |*space| {
+            // Free physical pages and unmap
+            var i: u64 = 0;
+            while (i < num_pages) : (i += 1) {
+                const virt = addr + i * page_size;
+                if (space.translate(virt)) |phys| {
+                    pmm.freePage(phys);
+                }
+                _ = space.unmapPage(virt);
+            }
+            return 0;
+        }
+    }
+    
+    return -1; // EINVAL
 }
 
 /// Test syscall dispatch (kernel-mode test)

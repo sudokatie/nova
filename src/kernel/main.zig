@@ -15,6 +15,7 @@ const thread = @import("proc/thread.zig");
 const scheduler = @import("proc/scheduler.zig");
 const syscall = @import("arch/x86_64/syscall.zig");
 const ipc = @import("ipc/message.zig");
+const integration = @import("test/integration.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -165,6 +166,9 @@ export fn kmain() noreturn {
             scheduler.getReadyCount(),
         });
     }
+
+    // Run integration tests
+    integration.runAll();
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});

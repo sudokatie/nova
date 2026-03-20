@@ -98,7 +98,7 @@ fn registerDefaults() void {
 /// Arguments in: RDI, RSI, RDX, R10, R8, R9
 /// Syscall number in: RAX
 /// Return value in: RAX
-export fn syscallDispatch(
+pub fn syscallDispatch(
     syscall_num: u64,
     arg1: u64,
     arg2: u64,

@@ -241,5 +241,330 @@ pub fn init() void {
     for (&endpoints) |*ep| {
         ep.* = Endpoint.init();
     }
+    for (&notifications) |*n| {
+        n.* = Notification.init();
+    }
+    for (&shared_regions) |*r| {
+        r.* = SharedRegion.init();
+    }
     console.log(.info, "IPC subsystem initialized", .{});
+}
+
+// ============= Last Caller Tracking (for reply) =============
+
+var last_callers: [MAX_ENDPOINTS]?*Thread = [_]?*Thread{null} ** MAX_ENDPOINTS;
+
+/// Get the last caller for a thread (used by reply syscall)
+pub fn getLastCaller(thread: *Thread) ?*Thread {
+    const idx = thread.tid % MAX_ENDPOINTS;
+    return last_callers[idx];
+}
+
+/// Set the last caller for a thread
+fn setLastCaller(receiver: *Thread, caller: *Thread) void {
+    const idx = receiver.tid % MAX_ENDPOINTS;
+    last_callers[idx] = caller;
+}
+
+// ============= Memory Grants =============
+
+pub const MAX_GRANTS: usize = 4;
+
+pub const MemoryGrant = struct {
+    phys_addr: u64,
+    length: u64,
+    rights: GrantRights,
+    valid: bool,
+
+    pub fn init() MemoryGrant {
+        return .{ .phys_addr = 0, .length = 0, .rights = .{}, .valid = false };
+    }
+};
+
+pub const GrantRights = packed struct {
+    read: bool = false,
+    write: bool = false,
+    execute: bool = false,
+    _reserved: u5 = 0,
+};
+
+/// Extended message with memory grants
+pub const ExtendedMessage = struct {
+    base: Message,
+    grants: [MAX_GRANTS]MemoryGrant,
+    grant_count: u8,
+
+    pub fn init(tag: u32) ExtendedMessage {
+        return .{
+            .base = Message.init(tag),
+            .grants = [_]MemoryGrant{MemoryGrant.init()} ** MAX_GRANTS,
+            .grant_count = 0,
+        };
+    }
+
+    /// Add a memory grant
+    pub fn addGrant(self: *ExtendedMessage, phys: u64, len: u64, rights: GrantRights) bool {
+        if (self.grant_count >= MAX_GRANTS) return false;
+        self.grants[self.grant_count] = .{
+            .phys_addr = phys,
+            .length = len,
+            .rights = rights,
+            .valid = true,
+        };
+        self.grant_count += 1;
+        return true;
+    }
+};
+
+// ============= Capabilities =============
+
+pub const CapabilityType = enum(u8) {
+    none = 0,
+    port = 1,
+    memory = 2,
+    thread = 3,
+    process = 4,
+};
+
+pub const Capability = struct {
+    cap_type: CapabilityType,
+    object_id: u32,
+    rights: u8,
+    valid: bool,
+
+    pub fn init() Capability {
+        return .{ .cap_type = .none, .object_id = 0, .rights = 0, .valid = false };
+    }
+};
+
+pub const MAX_CAPS_PER_MSG: usize = 2;
+
+/// Message with capability transfer
+pub const CapMessage = struct {
+    base: Message,
+    caps: [MAX_CAPS_PER_MSG]Capability,
+    cap_count: u8,
+
+    pub fn init(tag: u32) CapMessage {
+        return .{
+            .base = Message.init(tag),
+            .caps = [_]Capability{Capability.init()} ** MAX_CAPS_PER_MSG,
+            .cap_count = 0,
+        };
+    }
+
+    /// Add a capability
+    pub fn addCapability(self: *CapMessage, cap_type: CapabilityType, obj_id: u32, rights: u8) bool {
+        if (self.cap_count >= MAX_CAPS_PER_MSG) return false;
+        self.caps[self.cap_count] = .{
+            .cap_type = cap_type,
+            .object_id = obj_id,
+            .rights = rights,
+            .valid = true,
+        };
+        self.cap_count += 1;
+        return true;
+    }
+};
+
+// ============= Notification Objects =============
+
+pub const MAX_NOTIFICATIONS: usize = 64;
+
+pub const Notification = struct {
+    id: u32,
+    word: u64, // Bitmap of pending signals
+    waiting_thread: ?*Thread,
+    owner: ?*Thread,
+    active: bool,
+
+    pub fn init() Notification {
+        return .{
+            .id = 0,
+            .word = 0,
+            .waiting_thread = null,
+            .owner = null,
+            .active = false,
+        };
+    }
+};
+
+var notifications: [MAX_NOTIFICATIONS]Notification = undefined;
+var next_notification_id: u32 = 1;
+
+/// Create a notification object
+pub fn createNotification(owner: *Thread) ?*Notification {
+    for (&notifications, 0..) |*n, i| {
+        if (!n.active) {
+            n.* = Notification.init();
+            n.id = next_notification_id;
+            next_notification_id += 1;
+            n.owner = owner;
+            n.active = true;
+            _ = i;
+            return n;
+        }
+    }
+    return null;
+}
+
+/// Signal a notification (set bits in word)
+pub fn signal(notif: *Notification, bits: u64) void {
+    notif.word |= bits;
+
+    // Wake waiting thread if any
+    if (notif.waiting_thread) |t| {
+        notif.waiting_thread = null;
+        t.state = .ready;
+        scheduler.enqueue(t);
+    }
+}
+
+/// Wait for notification (blocks until bits set)
+pub fn waitNotification(notif: *Notification) u64 {
+    const current = context.getCurrent() orelse return 0;
+
+    if (notif.word != 0) {
+        // Already signaled
+        const result = notif.word;
+        notif.word = 0;
+        return result;
+    }
+
+    // Block and wait
+    notif.waiting_thread = current;
+    current.state = .blocked;
+    scheduler.schedule();
+
+    // Woken up - read and clear
+    const result = notif.word;
+    notif.word = 0;
+    return result;
+}
+
+/// Poll notification (non-blocking)
+pub fn pollNotification(notif: *Notification) u64 {
+    const result = notif.word;
+    notif.word = 0;
+    return result;
+}
+
+/// Destroy notification
+pub fn destroyNotification(notif: *Notification) void {
+    if (notif.waiting_thread) |t| {
+        t.state = .ready;
+        scheduler.enqueue(t);
+    }
+    notif.* = Notification.init();
+}
+
+// ============= Shared Memory Regions =============
+
+pub const MAX_SHARED_REGIONS: usize = 32;
+
+pub const SharedRegion = struct {
+    id: u32,
+    phys_base: u64,
+    size: u64,
+    owner: ?*Thread,
+    mappings: [8]?*Thread, // Threads that have this mapped
+    mapping_count: usize,
+    active: bool,
+
+    pub fn init() SharedRegion {
+        return .{
+            .id = 0,
+            .phys_base = 0,
+            .size = 0,
+            .owner = null,
+            .mappings = [_]?*Thread{null} ** 8,
+            .mapping_count = 0,
+            .active = false,
+        };
+    }
+};
+
+var shared_regions: [MAX_SHARED_REGIONS]SharedRegion = undefined;
+var next_region_id: u32 = 1;
+
+/// Create a shared memory region
+pub fn createSharedRegion(owner: *Thread, size: u64) ?*SharedRegion {
+    const pmm = @import("../mm/pmm.zig");
+
+    // Allocate physical pages
+    const num_pages = (size + 4095) / 4096;
+    const phys = pmm.allocPages(num_pages) orelse return null;
+
+    for (&shared_regions) |*r| {
+        if (!r.active) {
+            r.* = SharedRegion.init();
+            r.id = next_region_id;
+            next_region_id += 1;
+            r.phys_base = phys;
+            r.size = num_pages * 4096;
+            r.owner = owner;
+            r.active = true;
+            return r;
+        }
+    }
+
+    // No free slot - free allocated pages
+    pmm.freePages(phys, num_pages);
+    return null;
+}
+
+/// Map shared region into thread's address space
+pub fn mapSharedRegion(region: *SharedRegion, thread: *Thread, virt_addr: u64) bool {
+    const vmm = @import("../mm/vmm.zig");
+
+    // Check if already mapped
+    for (region.mappings) |m| {
+        if (m == thread) return true; // Already mapped
+    }
+
+    // Find free slot
+    for (&region.mappings) |*m| {
+        if (m.* == null) {
+            // Map into thread's address space
+            if (thread.process.address_space) |*space| {
+                const num_pages = region.size / 4096;
+                const flags = vmm.MapFlags{ .writable = true, .user = true };
+                if (!vmm.mapRange(space, virt_addr, region.phys_base, num_pages, flags)) {
+                    return false;
+                }
+                m.* = thread;
+                region.mapping_count += 1;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/// Unmap shared region from thread
+pub fn unmapSharedRegion(region: *SharedRegion, thread: *Thread, virt_addr: u64) void {
+    const vmm = @import("../mm/vmm.zig");
+
+    for (&region.mappings) |*m| {
+        if (m.* == thread) {
+            if (thread.process.address_space) |*space| {
+                vmm.unmapRange(space, virt_addr, region.size / 4096);
+            }
+            m.* = null;
+            region.mapping_count -= 1;
+            return;
+        }
+    }
+}
+
+/// Destroy shared region
+pub fn destroySharedRegion(region: *SharedRegion) void {
+    const pmm = @import("../mm/pmm.zig");
+
+    // Unmap from all threads first (caller's responsibility to handle this)
+    // Free physical memory
+    pmm.freePages(region.phys_base, region.size / 4096);
+
+    region.* = SharedRegion.init();
 }

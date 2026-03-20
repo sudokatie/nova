@@ -102,7 +102,7 @@ pub const Thread = struct {
             .kernel_stack_top = 0,
             .kernel_rsp = 0,
             .priority = 128, // Default priority
-            .time_slice = 10, // Default time slice
+            .time_slice = 5, // Default time slice (50ms at 100Hz)
             .sleep_until = 0,
         };
     }

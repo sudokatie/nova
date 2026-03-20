@@ -17,8 +17,8 @@ pub const PRIORITY_HIGH: u8 = 0;
 pub const PRIORITY_NORMAL: u8 = 1;
 pub const PRIORITY_LOW: u8 = 2;
 
-// Default time slice in ticks
-pub const DEFAULT_TIME_SLICE: u32 = 10;
+// Default time slice in ticks (50ms at 100Hz = 5 ticks)
+pub const DEFAULT_TIME_SLICE: u32 = 5;
 
 // Run queue entry (simple linked list)
 const QueueNode = struct {

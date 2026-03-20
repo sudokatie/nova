@@ -225,10 +225,29 @@ pub fn blockCurrent() void {
 }
 
 /// Unblock a thread
+/// Preempts current thread if unblocked thread has higher priority
 pub fn unblock(thread: *Thread) void {
-    if (thread.state == .blocked) {
+    if (thread.state == .blocked or thread.state == .sleeping) {
+        thread.state = .ready;
         enqueue(thread);
+
+        // Check if we should preempt
+        if (context.getCurrent()) |current| {
+            if (shouldPreempt(current, thread)) {
+                // Higher priority thread is now ready - preempt
+                schedule();
+            }
+        }
     }
+}
+
+/// Check if new_thread should preempt current_thread
+fn shouldPreempt(current_thread: *Thread, new_thread: *Thread) bool {
+    const current_prio = getPriorityIndex(current_thread.priority);
+    const new_prio = getPriorityIndex(new_thread.priority);
+
+    // Lower index = higher priority
+    return new_prio < current_prio;
 }
 
 /// Enable the scheduler

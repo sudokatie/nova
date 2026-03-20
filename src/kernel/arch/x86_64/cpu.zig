@@ -204,3 +204,46 @@ pub const IDTPointer = packed struct {
     limit: u16,
     base: u64,
 };
+
+/// IdtPtr for boot.zig reboot
+pub const IdtPtr = packed struct {
+    limit: u16,
+    base: u64,
+};
+
+/// CPUID result
+pub const CpuidResult = struct {
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+};
+
+/// Execute CPUID instruction
+pub fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
+    var eax: u32 = undefined;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+
+    asm volatile ("cpuid"
+        : [eax] "={eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [leaf] "{eax}" (leaf),
+          [subleaf] "{ecx}" (subleaf),
+    );
+
+    return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
+}
+
+/// Write CR0 register
+pub fn writeCr0(value: u64) void {
+    writeCR0(value);
+}
+
+/// Read CR0 register
+pub fn readCr0() u64 {
+    return readCR0();
+}

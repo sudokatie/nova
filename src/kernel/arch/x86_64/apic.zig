@@ -168,3 +168,13 @@ pub fn stopTimer() void {
 pub fn isEnabled() bool {
     return (read(APIC_SVR) & SVR_ENABLE) != 0;
 }
+
+/// Get local APIC ID for this CPU
+pub fn getLocalApicId() u8 {
+    return @truncate(read(APIC_ID) >> 24);
+}
+
+/// Send End of Interrupt (alias)
+pub fn eoi() void {
+    sendEoi();
+}

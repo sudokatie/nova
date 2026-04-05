@@ -1,13 +1,16 @@
 // Context Switching
 //
 // Save and restore thread CPU context for context switches.
+// Uses assembly for proper register manipulation.
 
 const Thread = @import("thread.zig").Thread;
 const Context = @import("thread.zig").Context;
+const ThreadState = @import("thread.zig").ThreadState;
 const vmm = @import("../mm/vmm.zig");
+const gdt = @import("../arch/x86_64/gdt.zig");
 const console = @import("../lib/console.zig");
 
-// Current running thread
+// Current running thread (per-CPU, but we only have one CPU)
 var current_thread: ?*Thread = null;
 
 /// Get the current running thread
@@ -20,123 +23,266 @@ pub fn setCurrent(thread: ?*Thread) void {
     current_thread = thread;
 }
 
-/// Switch from one thread to another
-/// This is the core context switch routine
-pub fn switchTo(old: ?*Thread, new: *Thread) void {
-    if (old == new) return;
-
-    // Save old thread's kernel RSP if it exists
-    if (old) |o| {
-        o.state = .ready;
-        // Save current RSP to old thread
-        o.kernel_rsp = asm volatile (""
-            : [rsp] "={rsp}" (-> u64),
-        );
-    }
-
-    // Switch address space if different process
-    if (old) |o| {
-        if (o.process != new.process) {
-            if (new.process.address_space) |*space| {
-                space.activate();
-            }
-        }
-    } else {
-        // No old thread, just switch to new address space
-        if (new.process.address_space) |*space| {
-            space.activate();
-        }
-    }
-
-    // Update current thread
-    new.state = .running;
-    current_thread = new;
-
-    // Restore new thread's context
-    // Load new RSP and continue execution
-    const new_rsp = new.kernel_rsp;
-    asm volatile (
-        \\mov %[rsp], %%rsp
-        :
-        : [rsp] "r" (new_rsp),
-    );
-}
-
 /// Initialize a thread's context for first run
-/// Sets up the kernel stack so switchTo will jump to entry point
+/// Sets up the kernel stack so context switch will start execution at entry point
 pub fn initContext(thread: *Thread, entry: u64, arg: u64) void {
     // Stack grows down, start at top
     var sp = thread.kernel_stack_top;
 
-    // Push initial context frame onto kernel stack
-    // This mimics what an interrupt would push
-    sp -= @sizeOf(Context);
+    // We need to set up the stack so that when we "restore" this context,
+    // execution begins at the entry point.
+    //
+    // Stack layout (from top to bottom):
+    // - SS (for iret to userspace, or dummy for kernel)
+    // - RSP (user stack or kernel stack)
+    // - RFLAGS
+    // - CS
+    // - RIP (entry point)
+    // - Error code (0)
+    // - Callee-saved registers (r15, r14, r13, r12, rbp, rbx)
+    // - Caller-saved registers (r11, r10, r9, r8, rdi, rsi, rdx, rcx, rax)
 
-    const ctx: *Context = @ptrFromInt(sp);
-    ctx.* = Context.init();
-    ctx.rip = entry;
-    ctx.rdi = arg; // First argument
-    ctx.rsp = thread.kernel_stack_top - 8; // Stack for entry function
-    ctx.rflags = 0x202; // IF enabled
+    // Align stack to 16 bytes
+    sp = sp & ~@as(u64, 0xF);
+
+    // Push interrupt frame
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0x10; // SS (kernel data)
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = thread.kernel_stack_top - 8; // RSP
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0x202; // RFLAGS (IF enabled)
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0x08; // CS (kernel code)
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = entry; // RIP
+
+    // Push error code
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+
+    // Push general purpose registers (in order they'll be popped)
+    // RAX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // RCX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // RDX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // RSI
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // RDI - first argument
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = arg;
+    // R8
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R9
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R10
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R11
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // RBX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // RBP
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R12
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R13
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R14
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+    // R15
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
 
     thread.kernel_rsp = sp;
-    thread.context = ctx.*;
+
+    // Also set up the context struct for debugging
+    thread.context.rip = entry;
+    thread.context.rdi = arg;
+    thread.context.rsp = thread.kernel_stack_top - 8;
+    thread.context.rflags = 0x202;
 }
 
-/// Save FPU/SSE state (for future use)
-pub fn saveFpuState(thread: *Thread) void {
-    _ = thread;
-    // TODO: FXSAVE to thread's FPU buffer
-}
-
-/// Restore FPU/SSE state (for future use)
-pub fn restoreFpuState(thread: *Thread) void {
-    _ = thread;
-    // TODO: FXRSTOR from thread's FPU buffer
-}
-
-/// Perform a full context switch with register save/restore
-/// This is called from the timer interrupt handler
+/// Perform a context switch from old thread to new thread
+/// This saves the current context and restores the new one
 pub fn contextSwitch(old: ?*Thread, new: *Thread) void {
-    if (old == new) return;
-
-    // Save old context if exists
     if (old) |o| {
-        saveContext(o);
+        if (o == new) return;
     }
 
-    // Switch address space if needed
-    if (old) |o| {
-        if (o.process != new.process) {
-            if (new.process.address_space) |*space| {
-                space.activate();
-            }
-        }
-    }
-
-    // Update state
+    // Update thread states
     if (old) |o| {
         if (o.state == .running) {
             o.state = .ready;
         }
     }
     new.state = .running;
+
+    // Switch address space if different process
+    const need_space_switch = if (old) |o|
+        o.process != new.process
+    else
+        true;
+
+    if (need_space_switch) {
+        if (new.process.address_space) |*space| {
+            space.activate();
+        }
+    }
+
+    // Update kernel stack in TSS for syscalls/interrupts
+    gdt.setKernelStack(new.kernel_stack_top);
+
+    // Update current thread
     current_thread = new;
 
-    // Restore new context
-    restoreContext(new);
+    // Perform the actual context switch
+    if (old) |o| {
+        switchContexts(&o.kernel_rsp, new.kernel_rsp);
+    } else {
+        // No old context to save, just load new
+        loadContext(new.kernel_rsp);
+    }
 }
 
-/// Save current CPU registers to thread
-fn saveContext(thread: *Thread) void {
-    // In a real implementation, this would be done in assembly
-    // by the interrupt handler pushing registers to stack
-    _ = thread;
+/// Assembly routine to switch between two contexts
+/// Saves callee-saved registers to old stack, loads new stack, restores registers
+fn switchContexts(old_rsp_ptr: *u64, new_rsp: u64) void {
+    asm volatile (
+    // Save callee-saved registers on current stack
+        \\pushq %%rbp
+        \\pushq %%rbx
+        \\pushq %%r12
+        \\pushq %%r13
+        \\pushq %%r14
+        \\pushq %%r15
+        \\pushfq
+        \\
+        // Save current RSP to old thread
+        \\movq %%rsp, (%[old_rsp_ptr])
+        \\
+        // Load new thread's RSP
+        \\movq %[new_rsp], %%rsp
+        \\
+        // Restore callee-saved registers from new stack
+        \\popfq
+        \\popq %%r15
+        \\popq %%r14
+        \\popq %%r13
+        \\popq %%r12
+        \\popq %%rbx
+        \\popq %%rbp
+        :
+        : [old_rsp_ptr] "r" (old_rsp_ptr),
+          [new_rsp] "r" (new_rsp),
+        : .{ .memory = true, .cc = true });
 }
 
-/// Restore CPU registers from thread
-fn restoreContext(thread: *Thread) void {
-    // In a real implementation, this would pop registers
-    // and iret back to the thread
+/// Load a new context without saving old one (for first switch)
+fn loadContext(new_rsp: u64) void {
+    asm volatile (
+    // Load new stack pointer
+        \\movq %[new_rsp], %%rsp
+        \\
+        // Pop all registers
+        \\popq %%r15
+        \\popq %%r14
+        \\popq %%r13
+        \\popq %%r12
+        \\popq %%rbp
+        \\popq %%rbx
+        \\popq %%r11
+        \\popq %%r10
+        \\popq %%r9
+        \\popq %%r8
+        \\popq %%rdi
+        \\popq %%rsi
+        \\popq %%rdx
+        \\popq %%rcx
+        \\popq %%rax
+        \\
+        // Skip error code
+        \\addq $8, %%rsp
+        \\
+        // Return via iret
+        \\iretq
+        :
+        : [new_rsp] "r" (new_rsp),
+        : .{ .memory = true });
+}
+
+/// Switch from kernel to user mode (used when starting a userspace thread)
+pub fn switchToUser(entry: u64, user_stack: u64, arg: u64) noreturn {
+    asm volatile (
+    // Set up stack for iret to user mode
+        \\pushq $0x23          // User SS (0x20 | 3)
+        \\pushq %[user_stack]  // User RSP
+        \\pushq $0x202         // RFLAGS (IF enabled)
+        \\pushq $0x1B          // User CS (0x18 | 3)
+        \\pushq %[entry]       // User RIP
+        \\
+        // Set up argument in RDI
+        \\movq %[arg], %%rdi
+        \\
+        // Clear other registers for security
+        \\xorq %%rax, %%rax
+        \\xorq %%rbx, %%rbx
+        \\xorq %%rcx, %%rcx
+        \\xorq %%rdx, %%rdx
+        \\xorq %%rsi, %%rsi
+        \\xorq %%rbp, %%rbp
+        \\xorq %%r8, %%r8
+        \\xorq %%r9, %%r9
+        \\xorq %%r10, %%r10
+        \\xorq %%r11, %%r11
+        \\xorq %%r12, %%r12
+        \\xorq %%r13, %%r13
+        \\xorq %%r14, %%r14
+        \\xorq %%r15, %%r15
+        \\
+        // Return to user mode
+        \\iretq
+        :
+        : [entry] "r" (entry),
+          [user_stack] "r" (user_stack),
+          [arg] "r" (arg),
+        : .{ .memory = true });
+    unreachable;
+}
+
+/// Save FPU/SSE state
+pub fn saveFpuState(thread: *Thread) void {
     _ = thread;
+    // TODO: FXSAVE to thread's FPU buffer when we support FPU
+}
+
+/// Restore FPU/SSE state
+pub fn restoreFpuState(thread: *Thread) void {
+    _ = thread;
+    // TODO: FXRSTOR from thread's FPU buffer when we support FPU
+}
+
+/// Yield the current thread's remaining time slice
+pub fn yield() void {
+    const scheduler = @import("scheduler.zig");
+    scheduler.yield();
+}
+
+/// Simple switch without full context frame (for cooperative switching)
+pub fn switchTo(old: ?*Thread, new: *Thread) void {
+    contextSwitch(old, new);
 }

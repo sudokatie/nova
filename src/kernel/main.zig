@@ -9,13 +9,20 @@ const panic_handler = @import("lib/panic.zig");
 const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const heap = @import("mm/heap.zig");
+const gdt = @import("arch/x86_64/gdt.zig");
+const idt = @import("arch/x86_64/idt.zig");
+const pic = @import("arch/x86_64/pic.zig");
+const apic = @import("arch/x86_64/apic.zig");
+const ioapic = @import("arch/x86_64/ioapic.zig");
 const timer = @import("drivers/timer.zig");
+const keyboard = @import("drivers/keyboard.zig");
 const process = @import("proc/process.zig");
 const thread = @import("proc/thread.zig");
 const scheduler = @import("proc/scheduler.zig");
 const syscall = @import("arch/x86_64/syscall.zig");
 const ipc = @import("ipc/message.zig");
 const integration = @import("test/integration.zig");
+const cpu = @import("arch/x86_64/cpu.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -52,10 +59,6 @@ export fn kmain() noreturn {
         panic_handler.panic_msg("No HHDM from bootloader");
     };
     console.log(.info, "HHDM offset: {x}", .{hhdm.offset});
-
-    // Note: GDT/IDT initialization deferred
-    // Limine sets up valid GDT/IDT that we can use for now
-    console.log(.info, "Using Limine GDT/IDT", .{});
 
     // Initialize physical memory manager
     console.log(.info, "Initializing PMM...", .{});
@@ -127,8 +130,32 @@ export fn kmain() noreturn {
     heap.init();
     heap.test_heap();
 
+    // Initialize GDT with TSS
+    console.log(.info, "Initializing GDT...", .{});
+    gdt.init();
+
+    // Disable legacy PIC
+    console.log(.info, "Disabling legacy PIC...", .{});
+    pic.disable();
+
+    // Initialize IDT
+    console.log(.info, "Initializing IDT...", .{});
+    idt.init();
+
+    // Initialize Local APIC
+    console.log(.info, "Initializing Local APIC...", .{});
+    _ = apic.init();
+
+    // Initialize I/O APIC
+    console.log(.info, "Initializing I/O APIC...", .{});
+    ioapic.init();
+    ioapic.setupStandardIRQs();
+
+    // Initialize keyboard
+    console.log(.info, "Initializing keyboard...", .{});
+    keyboard.init();
+
     // Initialize timer (APIC)
-    // Note: Timer interrupts won't fire until IDT is properly set up
     console.log(.info, "Initializing timer...", .{});
     timer.init(100); // 100 Hz
 
@@ -172,9 +199,37 @@ export fn kmain() noreturn {
 
     console.println("", .{});
     console.println("Hello from Nova kernel!", .{});
-    console.println("Boot successful. System halted.", .{});
+    console.println("Boot successful.", .{});
+    console.println("", .{});
 
-    // Halt - we don't have a scheduler yet
+    // Test keyboard - interactive loop
+    console.println("Keyboard test: type something (Ctrl+C to exit test)...", .{});
+
+    // Enable interrupts
+    cpu.enableInterrupts();
+
+    // Simple keyboard echo loop
+    var key_count: u32 = 0;
+    while (key_count < 100) { // Exit after 100 keys or timeout
+        const c = keyboard.getChar();
+        if (c != 0) {
+            if (c == 0x03) { // Ctrl+C
+                console.println("", .{});
+                console.println("Ctrl+C received, exiting keyboard test.", .{});
+                break;
+            }
+            console.putChar(c);
+            key_count += 1;
+        }
+
+        // Brief halt to save power
+        asm volatile ("hlt");
+    }
+
+    console.println("", .{});
+    console.println("System halted. Press reset to restart.", .{});
+
+    // Halt - we don't have a full scheduler running yet
     panic_handler.halt();
 }
 

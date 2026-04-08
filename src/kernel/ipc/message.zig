@@ -568,3 +568,34 @@ pub fn destroySharedRegion(region: *SharedRegion) void {
 
     region.* = SharedRegion.init();
 }
+
+// ============= Port-Based Messaging (for IRQ forwarding) =============
+
+const port = @import("port.zig");
+
+/// Send a message to a port by ID (non-blocking, for IRQ handlers)
+/// Returns true if message was delivered or queued
+pub fn sendToPort(port_id: u32, msg: *const Message) bool {
+    const p = port.findById(port_id) orelse return false;
+
+    // Queue the message (don't block - we're in an IRQ handler)
+    if (p.pending_count < p.pending_messages.len) {
+        p.pending_messages[p.pending_count] = msg.*;
+        p.pending_senders[p.pending_count] = null; // No sender thread for IRQ
+        p.pending_count += 1;
+
+        // Wake any waiting receiver
+        if (p.waiting_receiver_count > 0) {
+            p.waiting_receiver_count -= 1;
+            if (p.waiting_receivers[p.waiting_receiver_count]) |receiver| {
+                p.waiting_receivers[p.waiting_receiver_count] = null;
+                scheduler.unblock(receiver);
+            }
+        }
+
+        return true;
+    }
+
+    // Queue full
+    return false;
+}

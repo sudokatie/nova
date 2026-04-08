@@ -498,24 +498,60 @@ export fn handleException(vector: u64, error_code: u64) void {
 }
 
 export fn handleIRQ(vector: u64) void {
+    const irq_num: u8 = @truncate(vector - 32); // IRQs start at vector 32
+
     switch (vector) {
         32 => {
-            // Timer
+            // Timer - always handled by kernel
             scheduler.tick();
             wakeExpiredSleepers();
         },
         33 => {
-            // Keyboard
-            const keyboard = @import("../../drivers/keyboard.zig");
-            keyboard.handleInterrupt();
+            // Keyboard - check for userspace driver first
+            if (forwardIrqToUserspace(irq_num)) {
+                // Forwarded to userspace driver
+            } else {
+                // Fall back to kernel driver
+                const keyboard = @import("../../drivers/keyboard.zig");
+                keyboard.handleInterrupt();
+            }
         },
         else => {
-            // Spurious or unhandled
+            // Check if a userspace driver owns this IRQ
+            _ = forwardIrqToUserspace(irq_num);
         },
     }
     // EOI
     apic.sendEoi();
 }
+
+/// Forward an IRQ to a userspace driver via IPC
+/// Returns true if the IRQ was claimed by userspace
+fn forwardIrqToUserspace(irq: u8) bool {
+    const capability = @import("../../ipc/capability.zig");
+    const ipc_message = @import("../../ipc/message.zig");
+
+    // Check if any process owns this IRQ
+    const owner = capability.getIrqOwner(irq) orelse return false;
+
+    // Get the notification port from the process's capability set
+    const port = owner.capabilities.getIrqPort(irq) orelse return false;
+
+    // Create an IRQ notification message
+    var msg = ipc_message.Message.init(MSG_TAG_IRQ);
+    msg.setData(&[_]u8{irq});
+
+    // Send to the notification port (non-blocking)
+    // The userspace driver should have a thread waiting to receive
+    if (ipc_message.sendToPort(port, &msg)) {
+        return true;
+    }
+
+    return false;
+}
+
+/// Message tag for IRQ notifications
+const MSG_TAG_IRQ: u32 = 0x49525100; // "IRQ\0"
 
 // ============= Sleep Support =============
 

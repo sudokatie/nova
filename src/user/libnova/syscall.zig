@@ -38,6 +38,16 @@ pub const SYS_GETTIME: u64 = 41;
 // Debug
 pub const SYS_DEBUG_PRINT: u64 = 50;
 
+// Device Capabilities
+pub const SYS_REQUEST_IOPORT: u64 = 60;
+pub const SYS_RELEASE_IOPORT: u64 = 61;
+pub const SYS_REQUEST_IRQ: u64 = 62;
+pub const SYS_RELEASE_IRQ: u64 = 63;
+pub const SYS_INB: u64 = 64;
+pub const SYS_OUTB: u64 = 65;
+pub const SYS_INW: u64 = 66;
+pub const SYS_OUTW: u64 = 67;
+
 /// Raw syscall with 0 arguments
 pub inline fn syscall0(number: u64) i64 {
     return asm volatile ("syscall"
@@ -281,4 +291,50 @@ pub fn gettime() u64 {
 /// Print a debug message
 pub fn debug_print(msg: []const u8) isize {
     return @intCast(syscall2(SYS_DEBUG_PRINT, @intFromPtr(msg.ptr), msg.len));
+}
+
+// ============= Device Capability Syscalls =============
+
+/// Request access to I/O port range
+/// Returns 0 on success, -1 on error
+pub fn request_ioport(base: u16, count: u16) i32 {
+    return @intCast(syscall2(SYS_REQUEST_IOPORT, base, count));
+}
+
+/// Release I/O port access
+pub fn release_ioport(base: u16) i32 {
+    return @intCast(syscall1(SYS_RELEASE_IOPORT, base));
+}
+
+/// Request an IRQ
+/// notify_port: port ID to receive IRQ notifications on
+pub fn request_irq(irq: u8, notify_port: u32) i32 {
+    return @intCast(syscall2(SYS_REQUEST_IRQ, irq, notify_port));
+}
+
+/// Release an IRQ
+pub fn release_irq(irq: u8) i32 {
+    return @intCast(syscall1(SYS_RELEASE_IRQ, irq));
+}
+
+/// Read a byte from an I/O port
+/// Returns the byte value, or -1 if permission denied
+pub fn inb(port: u16) i32 {
+    return @intCast(syscall1(SYS_INB, port));
+}
+
+/// Write a byte to an I/O port
+/// Returns 0 on success, -1 if permission denied
+pub fn outb(port: u16, value: u8) i32 {
+    return @intCast(syscall2(SYS_OUTB, port, value));
+}
+
+/// Read a word from an I/O port
+pub fn inw(port: u16) i32 {
+    return @intCast(syscall1(SYS_INW, port));
+}
+
+/// Write a word to an I/O port
+pub fn outw(port: u16, value: u16) i32 {
+    return @intCast(syscall2(SYS_OUTW, port, value));
 }

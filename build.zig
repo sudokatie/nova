@@ -24,6 +24,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Add assembly stubs for operations that can't be done in Zig inline asm
+    kernel.addAssemblyFile(b.path("src/kernel/arch/x86_64/asm_stubs.s"));
+
     // Use custom linker script
     kernel.setLinkerScript(b.path("linker.ld"));
 

@@ -6,6 +6,7 @@ const vmm = @import("../mm/vmm.zig");
 const pmm = @import("../mm/pmm.zig");
 const console = @import("../lib/console.zig");
 const Thread = @import("thread.zig").Thread;
+const capability = @import("../ipc/capability.zig");
 
 // Maximum number of processes
 pub const MAX_PROCESSES: usize = 256;
@@ -34,6 +35,8 @@ pub const Process = struct {
     exit_code: i32,
     name: [32]u8,
     name_len: usize,
+    /// Device capabilities (I/O ports, IRQs, etc.)
+    capabilities: capability.CapabilitySet,
 
     const MAX_THREADS_PER_PROCESS = 16;
 
@@ -49,6 +52,7 @@ pub const Process = struct {
             .exit_code = 0,
             .name = [_]u8{0} ** 32,
             .name_len = 0,
+            .capabilities = capability.CapabilitySet.init(),
         };
     }
 

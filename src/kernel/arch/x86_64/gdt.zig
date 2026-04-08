@@ -184,30 +184,14 @@ pub fn init() void {
     console.log(.info, "GDT initialized with TSS", .{});
 }
 
+// External assembly functions (from asm_stubs.s)
+extern fn asm_lgdt(gdtr_ptr: *const GDTPointer) void;
+extern fn asm_reload_segments(code_sel: u64, data_sel: u16) void;
+
 /// Load the GDT register
 fn loadGDT() void {
-    asm volatile (
-        \\lgdt (%[gdtr])
-        \\
-        // Reload CS with far return
-        \\pushq %[kernel_cs]
-        \\leaq 1f(%%rip), %%rax
-        \\pushq %%rax
-        \\lretq
-        \\1:
-        // Reload data segments
-        \\movw %[kernel_ds], %%ax
-        \\movw %%ax, %%ds
-        \\movw %%ax, %%es
-        \\movw %%ax, %%fs
-        \\movw %%ax, %%gs
-        \\movw %%ax, %%ss
-        :
-        : [gdtr] "r" (&gdtr),
-          [kernel_cs] "i" (@as(u64, KERNEL_CS)),
-          [kernel_ds] "i" (KERNEL_DS),
-        : .{ .rax = true, .memory = true }
-    );
+    asm_lgdt(&gdtr);
+    asm_reload_segments(KERNEL_CS, KERNEL_DS);
 }
 
 /// Load the Task Register with TSS selector

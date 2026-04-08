@@ -12,6 +12,35 @@ const vmm = @import("../../mm/vmm.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const apic = @import("apic.zig");
 
+// External assembly stubs (from asm_stubs.s)
+// Handler function pointers - must be set before enabling interrupts
+extern var exception_handler_ptr: *const fn (u64, u64) callconv(.c) void;
+extern var irq_handler_ptr: *const fn (u64) callconv(.c) void;
+
+// ISR entry points
+extern fn asm_isr0() callconv(.naked) noreturn;
+extern fn asm_isr1() callconv(.naked) noreturn;
+extern fn asm_isr2() callconv(.naked) noreturn;
+extern fn asm_isr3() callconv(.naked) noreturn;
+extern fn asm_isr4() callconv(.naked) noreturn;
+extern fn asm_isr5() callconv(.naked) noreturn;
+extern fn asm_isr6() callconv(.naked) noreturn;
+extern fn asm_isr7() callconv(.naked) noreturn;
+extern fn asm_isr8() callconv(.naked) noreturn;
+extern fn asm_isr9() callconv(.naked) noreturn;
+extern fn asm_isr10() callconv(.naked) noreturn;
+extern fn asm_isr11() callconv(.naked) noreturn;
+extern fn asm_isr12() callconv(.naked) noreturn;
+extern fn asm_isr13() callconv(.naked) noreturn;
+extern fn asm_isr14() callconv(.naked) noreturn;
+extern fn asm_isr16() callconv(.naked) noreturn;
+extern fn asm_isr17() callconv(.naked) noreturn;
+extern fn asm_isr18() callconv(.naked) noreturn;
+extern fn asm_isr19() callconv(.naked) noreturn;
+extern fn asm_irq0() callconv(.naked) noreturn;
+extern fn asm_irq1() callconv(.naked) noreturn;
+extern fn asm_irq_spurious() callconv(.naked) noreturn;
+
 // IDT Entry (16 bytes in long mode)
 const IDTEntry = packed struct {
     offset_low: u16,
@@ -96,40 +125,44 @@ pub fn setHandlerWithIST(vector: u8, handler: u64, ist: u8, gate_type: u8) void 
 
 /// Initialize the IDT with handlers
 pub fn init() void {
-    // CPU exceptions (0-31)
-    setHandler(EXCEPTION_DIVIDE, @intFromPtr(&isr0), GATE_TRAP);
-    setHandler(EXCEPTION_DEBUG, @intFromPtr(&isr1), GATE_TRAP);
-    setHandlerWithIST(EXCEPTION_NMI, @intFromPtr(&isr2), IST_NMI, GATE_INTERRUPT);
-    setHandler(EXCEPTION_BREAKPOINT, @intFromPtr(&isr3), GATE_TRAP);
-    setHandler(EXCEPTION_OVERFLOW, @intFromPtr(&isr4), GATE_TRAP);
-    setHandler(EXCEPTION_BOUND, @intFromPtr(&isr5), GATE_TRAP);
-    setHandler(EXCEPTION_INVALID_OP, @intFromPtr(&isr6), GATE_TRAP);
-    setHandler(EXCEPTION_NO_DEVICE, @intFromPtr(&isr7), GATE_TRAP);
-    setHandlerWithIST(EXCEPTION_DOUBLE_FAULT, @intFromPtr(&isr8), IST_DOUBLE_FAULT, GATE_TRAP);
-    setHandler(EXCEPTION_COPROC_SEG, @intFromPtr(&isr9), GATE_TRAP);
-    setHandler(EXCEPTION_INVALID_TSS, @intFromPtr(&isr10), GATE_TRAP);
-    setHandler(EXCEPTION_NO_SEGMENT, @intFromPtr(&isr11), GATE_TRAP);
-    setHandler(EXCEPTION_STACK_FAULT, @intFromPtr(&isr12), GATE_TRAP);
-    setHandler(EXCEPTION_GPF, @intFromPtr(&isr13), GATE_TRAP);
-    setHandler(EXCEPTION_PAGE_FAULT, @intFromPtr(&isr14), GATE_TRAP);
+    // Set up handler function pointers for assembly stubs
+    exception_handler_ptr = &handleException;
+    irq_handler_ptr = &handleIRQ;
+
+    // CPU exceptions (0-31) - using external assembly ISR stubs
+    setHandler(EXCEPTION_DIVIDE, @intFromPtr(&asm_isr0), GATE_TRAP);
+    setHandler(EXCEPTION_DEBUG, @intFromPtr(&asm_isr1), GATE_TRAP);
+    setHandlerWithIST(EXCEPTION_NMI, @intFromPtr(&asm_isr2), IST_NMI, GATE_INTERRUPT);
+    setHandler(EXCEPTION_BREAKPOINT, @intFromPtr(&asm_isr3), GATE_TRAP);
+    setHandler(EXCEPTION_OVERFLOW, @intFromPtr(&asm_isr4), GATE_TRAP);
+    setHandler(EXCEPTION_BOUND, @intFromPtr(&asm_isr5), GATE_TRAP);
+    setHandler(EXCEPTION_INVALID_OP, @intFromPtr(&asm_isr6), GATE_TRAP);
+    setHandler(EXCEPTION_NO_DEVICE, @intFromPtr(&asm_isr7), GATE_TRAP);
+    setHandlerWithIST(EXCEPTION_DOUBLE_FAULT, @intFromPtr(&asm_isr8), IST_DOUBLE_FAULT, GATE_TRAP);
+    setHandler(EXCEPTION_COPROC_SEG, @intFromPtr(&asm_isr9), GATE_TRAP);
+    setHandler(EXCEPTION_INVALID_TSS, @intFromPtr(&asm_isr10), GATE_TRAP);
+    setHandler(EXCEPTION_NO_SEGMENT, @intFromPtr(&asm_isr11), GATE_TRAP);
+    setHandler(EXCEPTION_STACK_FAULT, @intFromPtr(&asm_isr12), GATE_TRAP);
+    setHandler(EXCEPTION_GPF, @intFromPtr(&asm_isr13), GATE_TRAP);
+    setHandler(EXCEPTION_PAGE_FAULT, @intFromPtr(&asm_isr14), GATE_TRAP);
     // Vector 15 is reserved
-    setHandler(EXCEPTION_X87_FP, @intFromPtr(&isr16), GATE_TRAP);
-    setHandler(EXCEPTION_ALIGNMENT, @intFromPtr(&isr17), GATE_TRAP);
-    setHandlerWithIST(EXCEPTION_MACHINE_CHECK, @intFromPtr(&isr18), IST_MACHINE_CHECK, GATE_TRAP);
-    setHandler(EXCEPTION_SIMD_FP, @intFromPtr(&isr19), GATE_TRAP);
+    setHandler(EXCEPTION_X87_FP, @intFromPtr(&asm_isr16), GATE_TRAP);
+    setHandler(EXCEPTION_ALIGNMENT, @intFromPtr(&asm_isr17), GATE_TRAP);
+    setHandlerWithIST(EXCEPTION_MACHINE_CHECK, @intFromPtr(&asm_isr18), IST_MACHINE_CHECK, GATE_TRAP);
+    setHandler(EXCEPTION_SIMD_FP, @intFromPtr(&asm_isr19), GATE_TRAP);
 
-    // Hardware IRQs (32-47) - handled by I/O APIC
-    setHandler(IRQ_TIMER, @intFromPtr(&irq0), GATE_INTERRUPT);
-    setHandler(IRQ_KEYBOARD, @intFromPtr(&irq1), GATE_INTERRUPT);
+    // Hardware IRQs (32-47) - using external assembly IRQ stubs
+    setHandler(IRQ_TIMER, @intFromPtr(&asm_irq0), GATE_INTERRUPT);
+    setHandler(IRQ_KEYBOARD, @intFromPtr(&asm_irq1), GATE_INTERRUPT);
 
-    // Set up remaining IRQ vectors
+    // Set up remaining IRQ vectors to spurious handler
     var i: u8 = 34;
     while (i < 48) : (i += 1) {
-        setHandler(i, @intFromPtr(&irqSpurious), GATE_INTERRUPT);
+        setHandler(i, @intFromPtr(&asm_irq_spurious), GATE_INTERRUPT);
     }
 
     // Spurious interrupt handler for APIC
-    setHandler(0xFF, @intFromPtr(&irqSpurious), GATE_INTERRUPT);
+    setHandler(0xFF, @intFromPtr(&asm_irq_spurious), GATE_INTERRUPT);
 
     // Load IDT
     idtr = .{

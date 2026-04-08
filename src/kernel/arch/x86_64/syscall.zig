@@ -15,6 +15,7 @@ const vmm = @import("../../mm/vmm.zig");
 const pmm = @import("../../mm/pmm.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const message = @import("../../ipc/message.zig");
+const capability = @import("../../ipc/capability.zig");
 const elf = @import("../../loader/elf.zig");
 const timer = @import("../../drivers/timer.zig");
 
@@ -78,6 +79,16 @@ pub const SYS_GETTIME: usize = 41;
 
 // Debug
 pub const SYS_DEBUG_PRINT: usize = 50;
+
+// Device Capabilities
+pub const SYS_REQUEST_IOPORT: usize = 60;
+pub const SYS_RELEASE_IOPORT: usize = 61;
+pub const SYS_REQUEST_IRQ: usize = 62;
+pub const SYS_RELEASE_IRQ: usize = 63;
+pub const SYS_INB: usize = 64;
+pub const SYS_OUTB: usize = 65;
+pub const SYS_INW: usize = 66;
+pub const SYS_OUTW: usize = 67;
 
 // ============= Per-CPU Data =============
 
@@ -370,6 +381,16 @@ fn registerDefaults() void {
 
     // Debug
     register(SYS_DEBUG_PRINT, &sysDebugPrint);
+
+    // Device Capabilities
+    register(SYS_REQUEST_IOPORT, &sysRequestIoport);
+    register(SYS_RELEASE_IOPORT, &sysReleaseIoport);
+    register(SYS_REQUEST_IRQ, &sysRequestIrq);
+    register(SYS_RELEASE_IRQ, &sysReleaseIrq);
+    register(SYS_INB, &sysInb);
+    register(SYS_OUTB, &sysOutb);
+    register(SYS_INW, &sysInw);
+    register(SYS_OUTW, &sysOutw);
 }
 
 /// Syscall dispatch
@@ -776,6 +797,145 @@ fn sysDebugPrint(ptr: u64, len: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     }
 
     return @intCast(safe_len);
+}
+
+// ============= Device Capability Syscalls =============
+
+/// Request access to an I/O port range
+/// Args: base_port, count
+/// Returns: 0 on success, -1 on error
+fn sysRequestIoport(base: u64, count: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const port: u16 = @truncate(base);
+    const port_count: u16 = @truncate(count);
+
+    // Try to reserve the ports globally
+    capability.reservePorts(port, port_count, process) catch {
+        return -1; // Ports in use or too many reservations
+    };
+
+    // Grant to process capability set
+    process.capabilities.grantIoPorts(port, port_count) catch {
+        capability.releasePorts(port, process);
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Release I/O port access
+fn sysReleaseIoport(base: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const port: u16 = @truncate(base);
+
+    if (process.capabilities.revokeIoPorts(port)) {
+        capability.releasePorts(port, process);
+        return 0;
+    }
+    return -1;
+}
+
+/// Request an IRQ
+/// Args: irq_number, notification_port
+fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const irq_num: u8 = @truncate(irq);
+    const port: u32 = @truncate(notify_port);
+
+    // Claim IRQ globally
+    capability.claimIrq(irq_num, process) catch {
+        return -1; // IRQ in use
+    };
+
+    // Grant to process
+    process.capabilities.grantIrq(irq_num, port) catch {
+        capability.releaseIrq(irq_num, process);
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Release an IRQ
+fn sysReleaseIrq(irq: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const irq_num: u8 = @truncate(irq);
+
+    if (process.capabilities.revokeIrq(irq_num)) {
+        capability.releaseIrq(irq_num, process);
+        return 0;
+    }
+    return -1;
+}
+
+/// Read a byte from an I/O port (with capability check)
+fn sysInb(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    // Check capability
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1; // Permission denied
+    }
+
+    // Perform the I/O
+    const value = cpu.inb(p);
+    return @as(i64, value);
+}
+
+/// Write a byte to an I/O port (with capability check)
+fn sysOutb(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1;
+    }
+
+    cpu.outb(p, @truncate(value));
+    return 0;
+}
+
+/// Read a word from an I/O port
+fn sysInw(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1;
+    }
+
+    const value = cpu.inw(p);
+    return @as(i64, value);
+}
+
+/// Write a word to an I/O port
+fn sysOutw(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1;
+    }
+
+    cpu.outw(p, @truncate(value));
+    return 0;
 }
 
 /// Test syscall dispatch (kernel-mode test)

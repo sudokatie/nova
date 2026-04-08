@@ -145,12 +145,12 @@ pub fn loadGDT(gdtr: *const GDTPointer) void {
     );
 }
 
+// External assembly function (from asm_stubs.s)
+extern fn asm_lidt(idtr_ptr: *const IDTPointer) void;
+
 /// Load IDT - takes pointer to IDTR
 pub fn loadIDT(idtr: *const IDTPointer) void {
-    asm volatile ("lidt %[idtr]"
-        :
-        : [idtr] "m" (idtr.*),
-    );
+    asm_lidt(idtr);
 }
 
 /// Load Task Register

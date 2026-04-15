@@ -12,6 +12,8 @@ const thread_mod = @import("../proc/thread.zig");
 const scheduler = @import("../proc/scheduler.zig");
 const syscall = @import("../arch/x86_64/syscall.zig");
 const ipc = @import("../ipc/message.zig");
+const vfs = @import("../fs/vfs.zig");
+const ramfs = @import("../fs/ramfs.zig");
 
 var tests_passed: u32 = 0;
 var tests_failed: u32 = 0;
@@ -28,6 +30,7 @@ pub fn runAll() void {
     testThread();
     testSyscall();
     testIpc();
+    testVfs();
 
     console.println("", .{});
     console.print("Results: ", .{});
@@ -226,4 +229,98 @@ fn testIpc() void {
     } else {
         fail("message create/setData/getData");
     }
+}
+
+fn testVfs() void {
+    console.println("[VFS Tests]", .{});
+
+    // Initialize ramfs
+    const fs = ramfs.init();
+    if (fs.root != null) {
+        pass("ramfs init");
+    } else {
+        fail("ramfs init");
+    }
+
+    // Mount at root
+    vfs.mount(fs, "/") catch {
+        fail("vfs mount");
+        return;
+    };
+    pass("vfs mount");
+
+    // Create file
+    const flags = vfs.OpenFlags{ .read = true, .write = true, .create = true };
+    const fd = vfs.open("/test.txt", flags) catch {
+        fail("vfs create file");
+        return;
+    };
+    pass("vfs create file");
+
+    // Write data
+    const write_data = "Hello, Nova VFS!";
+    const written = vfs.write(fd, write_data) catch {
+        fail("vfs write");
+        return;
+    };
+    if (written == write_data.len) {
+        pass("vfs write");
+    } else {
+        fail("vfs write");
+    }
+
+    // Seek back
+    _ = vfs.seek(fd, 0, .start) catch {
+        fail("vfs seek");
+        return;
+    };
+    pass("vfs seek");
+
+    // Read back
+    var buffer: [64]u8 = undefined;
+    const bytes_read = vfs.read(fd, &buffer) catch {
+        fail("vfs read");
+        return;
+    };
+    if (bytes_read == write_data.len) {
+        pass("vfs read");
+    } else {
+        fail("vfs read");
+    }
+
+    // Close
+    vfs.close(fd);
+    pass("vfs close");
+
+    // Create directory
+    vfs.mkdir("/mydir", vfs.DEFAULT_DIR_PERMS) catch {
+        fail("vfs mkdir");
+        return;
+    };
+    pass("vfs mkdir");
+
+    // Stat
+    const st = vfs.stat("/mydir") catch {
+        fail("vfs stat");
+        return;
+    };
+    if (st.file_type == .directory) {
+        pass("vfs stat");
+    } else {
+        fail("vfs stat");
+    }
+
+    // Unlink file
+    vfs.unlink("/test.txt") catch {
+        fail("vfs unlink");
+        return;
+    };
+    pass("vfs unlink");
+
+    // Rmdir
+    vfs.rmdir("/mydir") catch {
+        fail("vfs rmdir");
+        return;
+    };
+    pass("vfs rmdir");
 }

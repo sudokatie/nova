@@ -1,62 +1,41 @@
 // PS/2 Keyboard Driver
 //
-// Handles keyboard input via PS/2 controller.
-// Translates scancodes to keycodes and buffers input.
+// Handles keyboard input via I/O APIC interrupt.
+// Provides a character buffer for userspace to read from.
 
 const cpu = @import("../arch/x86_64/cpu.zig");
 const console = @import("../lib/console.zig");
-const scheduler = @import("../proc/scheduler.zig");
-const Thread = @import("../proc/thread.zig").Thread;
+const apic = @import("../arch/x86_64/apic.zig");
 
-// PS/2 controller ports
+// PS/2 keyboard ports
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 const COMMAND_PORT: u16 = 0x64;
 
 // Status register bits
-const STATUS_OUTPUT_FULL: u8 = 1 << 0;
-const STATUS_INPUT_FULL: u8 = 1 << 1;
+const STATUS_OUTPUT_FULL: u8 = 0x01;
+const STATUS_INPUT_FULL: u8 = 0x02;
 
 // Keyboard commands
 const CMD_SET_LEDS: u8 = 0xED;
 const CMD_ECHO: u8 = 0xEE;
-const CMD_GET_SET_SCANCODE: u8 = 0xF0;
-const CMD_ENABLE_SCANNING: u8 = 0xF4;
-const CMD_DISABLE_SCANNING: u8 = 0xF5;
+const CMD_SCANCODE_SET: u8 = 0xF0;
+const CMD_ENABLE: u8 = 0xF4;
 const CMD_RESET: u8 = 0xFF;
 
-// Key states
-pub const KeyState = enum {
-    pressed,
-    released,
-};
-
-// Key event
-pub const KeyEvent = struct {
-    scancode: u8,
-    keycode: u8,
-    state: KeyState,
-    shift: bool,
-    ctrl: bool,
-    alt: bool,
-};
-
-// Keyboard buffer
-const BUFFER_SIZE: usize = 64;
-var key_buffer: [BUFFER_SIZE]KeyEvent = undefined;
+// Circular buffer for keyboard input
+const BUFFER_SIZE: usize = 256;
+var key_buffer: [BUFFER_SIZE]u8 = [_]u8{0} ** BUFFER_SIZE;
 var buffer_head: usize = 0;
 var buffer_tail: usize = 0;
 
-// Modifier state
-var shift_held: bool = false;
-var ctrl_held: bool = false;
-var alt_held: bool = false;
+// Modifier key state
+var shift_pressed: bool = false;
+var ctrl_pressed: bool = false;
+var alt_pressed: bool = false;
 var caps_lock: bool = false;
 
-// Waiting threads
-var waiting_thread: ?*Thread = null;
-
-// Scancode to ASCII mapping (US QWERTY, lowercase)
+// US keyboard scancode to ASCII (set 1, make codes)
 const scancode_to_ascii = [_]u8{
     0,    0x1B, '1',  '2',  '3',  '4',  '5',  '6', // 0x00-0x07
     '7',  '8',  '9',  '0',  '-',  '=',  0x08, '\t', // 0x08-0x0F
@@ -71,7 +50,6 @@ const scancode_to_ascii = [_]u8{
     '2',  '3',  '0',  '.',  0,    0,    0,    0, // 0x50-0x57
 };
 
-// Shifted scancode to ASCII mapping
 const scancode_to_ascii_shift = [_]u8{
     0,    0x1B, '!',  '@',  '#',  '$',  '%',  '^', // 0x00-0x07
     '&',  '*',  '(',  ')',  '_',  '+',  0x08, '\t', // 0x08-0x0F
@@ -83,45 +61,44 @@ const scancode_to_ascii_shift = [_]u8{
     0,    ' ',  0,    0,    0,    0,    0,    0, // 0x38-0x3F
 };
 
-// Special keycodes
-pub const KEY_ESCAPE: u8 = 0x01;
-pub const KEY_BACKSPACE: u8 = 0x0E;
-pub const KEY_TAB: u8 = 0x0F;
-pub const KEY_ENTER: u8 = 0x1C;
-pub const KEY_LCTRL: u8 = 0x1D;
-pub const KEY_LSHIFT: u8 = 0x2A;
-pub const KEY_RSHIFT: u8 = 0x36;
-pub const KEY_LALT: u8 = 0x38;
-pub const KEY_CAPS_LOCK: u8 = 0x3A;
-pub const KEY_F1: u8 = 0x3B;
-pub const KEY_F12: u8 = 0x58;
-pub const KEY_UP: u8 = 0x48;
-pub const KEY_DOWN: u8 = 0x50;
-pub const KEY_LEFT: u8 = 0x4B;
-pub const KEY_RIGHT: u8 = 0x4D;
+// Special scancodes
+const SCANCODE_LSHIFT: u8 = 0x2A;
+const SCANCODE_RSHIFT: u8 = 0x36;
+const SCANCODE_CTRL: u8 = 0x1D;
+const SCANCODE_ALT: u8 = 0x38;
+const SCANCODE_CAPS: u8 = 0x3A;
+const SCANCODE_EXTENDED: u8 = 0xE0;
 
 var initialized: bool = false;
 
 /// Initialize the keyboard driver
 pub fn init() void {
-    // Wait for controller to be ready
-    waitInputEmpty();
+    // Wait for keyboard controller to be ready
+    waitInput();
 
-    // Enable keyboard scanning
-    cpu.outb(DATA_PORT, CMD_ENABLE_SCANNING);
-    waitAck();
+    // Enable keyboard
+    cpu.outb(COMMAND_PORT, 0xAE); // Enable first PS/2 port
+    waitInput();
 
-    // Clear any pending data
+    // Read and discard any pending data
     while ((cpu.inb(STATUS_PORT) & STATUS_OUTPUT_FULL) != 0) {
         _ = cpu.inb(DATA_PORT);
     }
 
+    // Enable scanning
+    waitInput();
+    cpu.outb(DATA_PORT, CMD_ENABLE);
+
+    // Wait for ACK
+    waitOutput();
+    _ = cpu.inb(DATA_PORT);
+
     initialized = true;
-    console.log(.info, "PS/2 keyboard initialized", .{});
+    console.log(.info, "Keyboard initialized", .{});
 }
 
 /// Wait for input buffer to be empty
-fn waitInputEmpty() void {
+fn waitInput() void {
     var timeout: u32 = 100000;
     while (timeout > 0) : (timeout -= 1) {
         if ((cpu.inb(STATUS_PORT) & STATUS_INPUT_FULL) == 0) {
@@ -130,152 +107,137 @@ fn waitInputEmpty() void {
     }
 }
 
-/// Wait for ACK from keyboard
-fn waitAck() void {
+/// Wait for output buffer to be full
+fn waitOutput() void {
     var timeout: u32 = 100000;
     while (timeout > 0) : (timeout -= 1) {
         if ((cpu.inb(STATUS_PORT) & STATUS_OUTPUT_FULL) != 0) {
-            const data = cpu.inb(DATA_PORT);
-            if (data == 0xFA) return; // ACK
+            return;
         }
     }
 }
 
-/// Handle keyboard interrupt (IRQ 1)
+/// Handle keyboard interrupt
 pub fn handleInterrupt() void {
+    // Read scancode
     const scancode = cpu.inb(DATA_PORT);
 
-    // Check for key release (bit 7 set)
-    const released = (scancode & 0x80) != 0;
-    const code = scancode & 0x7F;
-
-    // Update modifier state
-    switch (code) {
-        KEY_LSHIFT, KEY_RSHIFT => {
-            shift_held = !released;
-            return;
-        },
-        KEY_LCTRL => {
-            ctrl_held = !released;
-            return;
-        },
-        KEY_LALT => {
-            alt_held = !released;
-            return;
-        },
-        KEY_CAPS_LOCK => {
-            if (!released) {
-                caps_lock = !caps_lock;
-            }
-            return;
-        },
-        else => {},
+    // Handle extended scancodes
+    if (scancode == SCANCODE_EXTENDED) {
+        // Next byte is the extended code - we'll handle it on next interrupt
+        return;
     }
 
-    // Get ASCII value
+    // Check for key release (high bit set)
+    const is_release = (scancode & 0x80) != 0;
+    const code = scancode & 0x7F;
+
+    // Handle modifier keys
+    if (code == SCANCODE_LSHIFT or code == SCANCODE_RSHIFT) {
+        shift_pressed = !is_release;
+        return;
+    }
+    if (code == SCANCODE_CTRL) {
+        ctrl_pressed = !is_release;
+        return;
+    }
+    if (code == SCANCODE_ALT) {
+        alt_pressed = !is_release;
+        return;
+    }
+    if (code == SCANCODE_CAPS and !is_release) {
+        caps_lock = !caps_lock;
+        return;
+    }
+
+    // Only process key presses, not releases
+    if (is_release) return;
+
+    // Convert scancode to ASCII
     var ascii: u8 = 0;
     if (code < scancode_to_ascii.len) {
-        const use_shift = shift_held != caps_lock; // XOR for caps lock effect
-        if (use_shift and code < scancode_to_ascii_shift.len) {
-            ascii = scancode_to_ascii_shift[code];
+        if (shift_pressed) {
+            if (code < scancode_to_ascii_shift.len) {
+                ascii = scancode_to_ascii_shift[code];
+            }
         } else {
             ascii = scancode_to_ascii[code];
         }
+
+        // Handle caps lock for letters
+        if (caps_lock and ascii >= 'a' and ascii <= 'z') {
+            ascii = ascii - 'a' + 'A';
+        } else if (caps_lock and ascii >= 'A' and ascii <= 'Z') {
+            ascii = ascii - 'A' + 'a';
+        }
     }
 
-    // Create key event
-    const event = KeyEvent{
-        .scancode = scancode,
-        .keycode = ascii,
-        .state = if (released) .released else .pressed,
-        .shift = shift_held,
-        .ctrl = ctrl_held,
-        .alt = alt_held,
-    };
+    if (ascii != 0) {
+        // Handle Ctrl+C
+        if (ctrl_pressed and (ascii == 'c' or ascii == 'C')) {
+            ascii = 0x03; // ETX (Ctrl+C)
+        }
 
-    // Add to buffer
-    bufferPut(event);
+        // Add to buffer
+        pushChar(ascii);
 
-    // Wake waiting thread
-    if (waiting_thread) |t| {
-        waiting_thread = null;
-        scheduler.unblock(t);
+        // Echo to console for debugging
+        // console.putChar(ascii);
     }
 }
 
-/// Put a key event in the buffer
-fn bufferPut(event: KeyEvent) void {
+/// Push a character to the buffer
+fn pushChar(c: u8) void {
     const next_head = (buffer_head + 1) % BUFFER_SIZE;
+
+    // Don't overwrite unread data
     if (next_head != buffer_tail) {
-        key_buffer[buffer_head] = event;
+        key_buffer[buffer_head] = c;
         buffer_head = next_head;
     }
-    // Buffer full - drop the event
 }
 
-/// Get a key event from the buffer (non-blocking)
-pub fn getKey() ?KeyEvent {
+/// Get a character from the buffer (non-blocking)
+/// Returns 0 if buffer is empty
+pub fn getChar() u8 {
     if (buffer_tail == buffer_head) {
-        return null;
+        return 0; // Buffer empty
     }
-    const event = key_buffer[buffer_tail];
+
+    const c = key_buffer[buffer_tail];
     buffer_tail = (buffer_tail + 1) % BUFFER_SIZE;
-    return event;
+    return c;
 }
 
-/// Read a character (blocking)
-pub fn readChar() u8 {
-    while (true) {
-        if (getKey()) |event| {
-            if (event.state == .pressed and event.keycode != 0) {
-                return event.keycode;
-            }
-        }
-        // Would block here in real implementation
-        asm volatile ("pause");
-    }
-}
-
-/// Read a line into buffer (blocking)
-pub fn readLine(buf: []u8) usize {
-    var pos: usize = 0;
-    while (pos < buf.len - 1) {
-        const c = readChar();
-
-        if (c == '\n') {
-            buf[pos] = 0;
-            return pos;
-        } else if (c == 0x08) { // Backspace
-            if (pos > 0) {
-                pos -= 1;
-            }
-        } else if (c >= 0x20) { // Printable
-            buf[pos] = c;
-            pos += 1;
-        }
-    }
-    buf[pos] = 0;
-    return pos;
-}
-
-/// Check if keyboard input is available
-pub fn hasInput() bool {
+/// Check if there's data available
+pub fn hasData() bool {
     return buffer_tail != buffer_head;
 }
 
-/// Set LED state (caps, num, scroll lock)
-pub fn setLeds(caps: bool, num: bool, scroll: bool) void {
-    var leds: u8 = 0;
-    if (scroll) leds |= 1;
-    if (num) leds |= 2;
-    if (caps) leds |= 4;
+/// Get number of characters in buffer
+pub fn available() usize {
+    if (buffer_head >= buffer_tail) {
+        return buffer_head - buffer_tail;
+    } else {
+        return BUFFER_SIZE - buffer_tail + buffer_head;
+    }
+}
 
-    waitInputEmpty();
-    cpu.outb(DATA_PORT, CMD_SET_LEDS);
-    waitAck();
-    waitInputEmpty();
-    cpu.outb(DATA_PORT, leds);
-    waitAck();
+/// Blocking read - waits for a character
+/// Note: This should only be called from kernel context
+pub fn readCharBlocking() u8 {
+    while (!hasData()) {
+        // Enable interrupts and wait
+        cpu.enableInterrupts();
+        asm volatile ("hlt");
+    }
+    return getChar();
+}
+
+/// Clear the input buffer
+pub fn clearBuffer() void {
+    buffer_head = 0;
+    buffer_tail = 0;
 }
 
 /// Check if keyboard is initialized

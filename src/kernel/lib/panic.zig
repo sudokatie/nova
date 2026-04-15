@@ -95,3 +95,22 @@ pub fn assert_at(condition: bool, msg: []const u8, src: std.builtin.SourceLocati
         panic_at(msg, src);
     }
 }
+
+/// Panic with formatted message
+pub fn panicFmt(comptime fmt: []const u8, args: anytype) noreturn {
+    serial.writeString("\n");
+    serial.writeString("========================================\n");
+    serial.writeString("        !!! KERNEL PANIC !!!\n");
+    serial.writeString("========================================\n");
+    serial.writeString("\n");
+    serial.writeString("Message: ");
+    
+    // Format the message inline
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch fmt;
+    serial.writeString(msg);
+    
+    serial.writeString("\n\n");
+    serial.writeString("System halted.\n");
+    halt();
+}

@@ -4,6 +4,7 @@
 // Uses the fast syscall mechanism via MSRs.
 
 const cpu = @import("cpu.zig");
+const gdt = @import("gdt.zig");
 const console = @import("../../lib/console.zig");
 const context = @import("../../proc/context.zig");
 const Thread = @import("../../proc/thread.zig").Thread;
@@ -14,23 +15,26 @@ const vmm = @import("../../mm/vmm.zig");
 const pmm = @import("../../mm/pmm.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const message = @import("../../ipc/message.zig");
+const capability = @import("../../ipc/capability.zig");
 const elf = @import("../../loader/elf.zig");
 const timer = @import("../../drivers/timer.zig");
 
 // MSR addresses for syscall
+const MSR_EFER: u32 = 0xC0000080;
 const MSR_STAR: u32 = 0xC0000081;
 const MSR_LSTAR: u32 = 0xC0000082;
 const MSR_CSTAR: u32 = 0xC0000083;
 const MSR_FMASK: u32 = 0xC0000084;
 
+// EFER bits
+const EFER_SCE: u64 = 1 << 0; // Syscall enable
+
 // Segment selectors (must match GDT)
 const KERNEL_CS: u64 = 0x08;
 const KERNEL_DS: u64 = 0x10;
-const USER_CS: u64 = 0x18 | 3;
-const USER_DS: u64 = 0x20 | 3;
 
-// RFLAGS to clear on syscall entry
-const FMASK_VALUE: u64 = 0x200;
+// RFLAGS to clear on syscall entry (clear IF to disable interrupts)
+const FMASK_VALUE: u64 = 0x200; // Clear IF
 
 // Maximum syscall number
 pub const MAX_SYSCALLS: usize = 256;
@@ -76,30 +80,264 @@ pub const SYS_GETTIME: usize = 41;
 // Debug
 pub const SYS_DEBUG_PRINT: usize = 50;
 
-// Per-CPU data for syscall handling
-pub const PerCpuData = struct {
-    kernel_rsp: u64,
-    user_rsp: u64,
-    current_thread: ?*Thread,
+// Device Capabilities
+pub const SYS_REQUEST_IOPORT: usize = 60;
+pub const SYS_RELEASE_IOPORT: usize = 61;
+pub const SYS_REQUEST_IRQ: usize = 62;
+pub const SYS_RELEASE_IRQ: usize = 63;
+pub const SYS_INB: usize = 64;
+pub const SYS_OUTB: usize = 65;
+pub const SYS_INW: usize = 66;
+pub const SYS_OUTW: usize = 67;
+
+// ============= Per-CPU Data =============
+
+pub const PerCpuData = extern struct {
+    kernel_rsp: u64, // Kernel stack pointer
+    user_rsp: u64, // Saved user stack pointer
+    current_thread: ?*Thread, // Current running thread
+
+    pub fn init() PerCpuData {
+        return .{
+            .kernel_rsp = 0,
+            .user_rsp = 0,
+            .current_thread = null,
+        };
+    }
 };
 
-var per_cpu: PerCpuData = .{
-    .kernel_rsp = 0,
-    .user_rsp = 0,
-    .current_thread = null,
-};
+// Per-CPU data (one for each CPU, currently just one)
+pub var per_cpu: PerCpuData = PerCpuData.init();
+
+// ============= Syscall Entry Point =============
+
+/// Syscall entry point (naked function)
+/// ABI: syscall number in RAX, args in RDI, RSI, RDX, R10, R8, R9
+/// RCX contains return RIP, R11 contains RFLAGS
+pub fn syscallEntry() callconv(.naked) void {
+    // Save user RSP and switch to kernel stack
+    // The swapgs instruction would be used with per-CPU data in GS base
+    // For simplicity, we use a global variable
+
+    asm volatile (
+        // Save user stack pointer
+        \\movq %%rsp, per_cpu + 8   // per_cpu.user_rsp
+        \\
+        // Load kernel stack pointer
+        \\movq per_cpu, %%rsp       // per_cpu.kernel_rsp
+        \\
+        // Push interrupt frame (for SYSRET compatibility)
+        \\pushq $0x23               // User SS (0x20 | 3)
+        \\pushq per_cpu + 8         // User RSP
+        \\pushq %%r11               // RFLAGS (from R11)
+        \\pushq $0x1b               // User CS (0x18 | 3)
+        \\pushq %%rcx               // User RIP (from RCX)
+        \\
+        // Push error code (0 for syscall)
+        \\pushq $0
+        \\
+        // Push all general purpose registers
+        \\pushq %%rax
+        \\pushq %%rbx
+        \\pushq %%rcx
+        \\pushq %%rdx
+        \\pushq %%rsi
+        \\pushq %%rdi
+        \\pushq %%rbp
+        \\pushq %%r8
+        \\pushq %%r9
+        \\pushq %%r10
+        \\pushq %%r11
+        \\pushq %%r12
+        \\pushq %%r13
+        \\pushq %%r14
+        \\pushq %%r15
+        \\
+        // Move R10 to RCX (R10 is 4th arg in syscall ABI, RCX is clobbered)
+        \\movq %%r10, %%rcx
+        \\
+        // Call the dispatch function
+        // Args already in: RDI, RSI, RDX, RCX (was R10), R8, R9
+        // Syscall number in RAX
+        \\movq %%rax, %%rdi         // syscall_num -> arg1
+        \\movq 14*8(%%rsp), %%rsi   // original RDI -> arg2
+        \\movq 13*8(%%rsp), %%rdx   // original RSI -> arg3
+        \\movq 5*8(%%rsp), %%rcx    // original R10 -> arg4
+        \\movq 7*8(%%rsp), %%r8     // original R8 -> arg5
+        \\movq 6*8(%%rsp), %%r9     // original R9 -> arg6
+        \\
+        \\call syscallDispatchWrapper
+        \\
+        // Return value in RAX - store it
+        \\movq %%rax, 15*8(%%rsp)
+        \\
+        // Pop registers
+        \\popq %%r15
+        \\popq %%r14
+        \\popq %%r13
+        \\popq %%r12
+        \\popq %%r11
+        \\popq %%r10
+        \\popq %%r9
+        \\popq %%r8
+        \\popq %%rbp
+        \\popq %%rdi
+        \\popq %%rsi
+        \\popq %%rdx
+        \\popq %%rcx
+        \\popq %%rbx
+        \\popq %%rax
+        \\
+        // Skip error code
+        \\addq $8, %%rsp
+        \\
+        // Pop interrupt frame and return
+        \\popq %%rcx               // RIP -> RCX for SYSRET
+        \\addq $8, %%rsp           // Skip CS
+        \\popq %%r11               // RFLAGS -> R11 for SYSRET
+        \\popq %%rsp               // Restore user RSP
+        \\
+        // Return to userspace
+        \\sysretq
+    );
+}
+
+/// Wrapper function called from assembly
+export fn syscallDispatchWrapper(
+    syscall_num: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+) callconv(.c) i64 {
+    // Get 6th argument from stack (R9 was saved there)
+    // For now, just use 5 args - full 6 arg support would need more stack manipulation
+    return syscallDispatch(syscall_num, arg1, arg2, arg3, arg4, arg5, 0);
+}
 
 /// Initialize the syscall interface
 pub fn init() void {
-    const star_value: u64 = ((USER_CS - 16) << 48) | (KERNEL_CS << 32);
+    // Enable syscall instruction in EFER
+    var efer = cpu.readMSR(MSR_EFER);
+    efer |= EFER_SCE;
+    cpu.writeMSR(MSR_EFER, efer);
+
+    // STAR: Segment selectors
+    // Bits 47:32 = SYSRET CS/SS (loaded as CS=this+16, SS=this+8)
+    // Bits 63:48 = SYSCALL CS/SS (loaded as CS=this, SS=this+8)
+    // For SYSCALL: CS = KERNEL_CS, SS = KERNEL_CS + 8 = KERNEL_DS
+    // For SYSRET: CS = (USER_CS_BASE) + 16 = 0x18 | 3, SS = (USER_CS_BASE) + 8 = 0x20 | 3
+    // So USER_CS_BASE should be 0x08 (0x08 + 16 = 0x18, 0x08 + 8 = 0x10, but we need user segs)
+    // Actually: SYSRET loads SS = STAR[63:48] + 8, CS = STAR[63:48] + 16 (for 64-bit)
+    // So we want STAR[63:48] = 0x08, which gives SS=0x10|3=0x13 (wrong), CS=0x18|3=0x1B (ok)
+    // Correct: STAR[63:48] = 0x10, gives SS=0x18|3, CS=0x20|3... also wrong
+    // The spec says: For SYSRET 64-bit, CS = IA32_STAR[63:48]+16, SS = IA32_STAR[63:48]+8
+    // We want CS=0x18|3=0x1B, SS=0x20|3=0x23
+    // So: 0x1B = X + 16, X = 0x0B... but that's not 0x10-aligned
+    // Actually the +16/+8 doesn't add ring bits. The selector itself must have them.
+    // STAR[63:48] for SYSRET should be 0x0B (0x18-16=0x08... no, 0x1B-16=0x0B)
+    // Let me re-read: the hardware adds 16 to get CS selector, 8 to get SS selector
+    // And then ORs in RPL 3.
+    // So: STAR[63:48] = 0x08, CS = 0x08 + 16 = 0x18, SS = 0x08 + 8 = 0x10
+    // Then hardware ORs RPL 3: CS = 0x18|3 = 0x1B, SS = 0x10|3 = 0x13
+    // But our user SS is at 0x20! So STAR[63:48] should be 0x18
+    // CS = 0x18 + 16 = 0x28 | 3 = 0x2B... that's wrong too
+    // 
+    // Actually, I had the GDT order wrong. Standard order is:
+    // 0x00: null, 0x08: kernel code, 0x10: kernel data, 0x18: user data, 0x20: user code
+    // Wait no, typically it's: null, kcode, kdata, ucode, udata
+    // SYSRET 64-bit: CS = STAR[63:48] + 16, SS = STAR[63:48] + 8
+    // With our GDT: kcode=0x08, kdata=0x10, ucode=0x18, udata=0x20
+    // We want ucode=0x18|3=0x1B, udata=0x20|3=0x23
+    // STAR[63:48] + 16 = 0x18 => STAR[63:48] = 0x08
+    // STAR[63:48] + 8 = 0x10 (kernel data, but we want user data 0x20!)
+    // 
+    // The issue is the GDT layout. For SYSRET to work, user CS must be user DS - 8.
+    // So if udata=0x20, ucode should be 0x20-8=0x18? No, SYSRET adds to get CS, adds less to get SS
+    // CS = base + 16, SS = base + 8
+    // If base = 0x10: CS = 0x26|3, SS = 0x18|3
+    // If base = 0x08: CS = 0x18|3, SS = 0x10|3
+    // 
+    // I need to reorder GDT: null, kcode, kdata, udata, ucode (so ucode = udata + 8)
+    // Then base = 0x10: SS = 0x18 (udata), CS = 0x26... still wrong
+    // 
+    // Actually reading Intel manual more carefully:
+    // SYSRET loads CS from IA32_STAR[63:48]+16, SS from IA32_STAR[63:48]+8
+    // So if I want CS=0x18, SS=0x20, then 0x18 = base+16, 0x20 = base+8
+    // base = 0x08, 0x08+16=0x18 OK, 0x08+8=0x10 != 0x20 WRONG
+    // 
+    // The only way this works is if user SS is at user CS - 8
+    // So GDT must be: null, kcode, kdata, ucode, udata where udata = ucode + 8
+    // But standard is ucode before udata...
+    // 
+    // Many OSes swap the order: null, kcode, kdata, udata, ucode
+    // Then ucode = 0x20, udata = 0x18
+    // SYSRET with base=0x10: CS = 0x10+16 = 0x26|3, SS = 0x10+8 = 0x18|3
+    // Still doesn't work... because CS should be 0x20
+    // 
+    // Let me try: GDT = null(0x00), kcode(0x08), kdata(0x10), udata(0x18), ucode(0x20)
+    // SYSRET base = 0x10: CS = 0x26... still off
+    // 
+    // OK I think I finally understand. The selectors themselves are:
+    // STAR[63:48] is used as a BASE, not a selector.
+    // Resulting CS = BASE + 16, SS = BASE + 8
+    // So if BASE = 0x08:
+    //   CS selector = 0x08 + 16 = 0x18, then OR with 3 = 0x1B
+    //   SS selector = 0x08 + 8 = 0x10, then OR with 3 = 0x13
+    // This means user CS must be at index 3 (0x18), user SS at index 2 (0x10)
+    // But index 2 is kernel data!
+    // 
+    // The solution is to have GDT: null, kcode, kdata, ucode (32-bit compat), udata, ucode64
+    // Or simpler: null, kcode, kdata, userdata32, usercode64
+    // Then STAR[63:48] = (user32 - 8) so that +16 and +8 land on correct entries
+    // 
+    // Simplest working layout for SYSRET 64-bit:
+    // 0x00: null
+    // 0x08: kernel code 64
+    // 0x10: kernel data
+    // 0x18: user data (SS for SYSRET = base+8 where base=0x10, 0x10+8=0x18)
+    // 0x20: user code 64 (CS for SYSRET = base+16, 0x10+16=0x20)
+    // So STAR[63:48] = 0x10, giving SS=0x18|3=0x1B, CS=0x20|3=0x23
+    // 
+    // Let me update to this layout.
+
+    // With corrected GDT layout:
+    // 0x08 = kernel code, 0x10 = kernel data
+    // 0x18 = user data, 0x20 = user code
+    // For SYSCALL: CS = STAR[47:32], SS = STAR[47:32] + 8
+    // For SYSRET 64: CS = STAR[63:48] + 16 | 3, SS = STAR[63:48] + 8 | 3
+    // 
+    // SYSCALL: we want CS=0x08, SS=0x10
+    //   STAR[47:32] = 0x08, SS = 0x08 + 8 = 0x10 ✓
+    // SYSRET: we want CS=0x23 (0x20|3), SS=0x1B (0x18|3)
+    //   STAR[63:48] + 16 = 0x20 => STAR[63:48] = 0x10
+    //   STAR[63:48] + 8 = 0x18 ✓
+    // 
+    // So STAR = (0x10 << 48) | (0x08 << 32) but the shifts are different in how OS does it
+    // Actually: STAR[31:0] = reserved, [47:32] = SYSCALL CS, [63:48] = SYSRET CS base
+    // Value: ((SYSRET_BASE) << 48) | ((SYSCALL_CS) << 32)
+    // SYSRET_BASE = 0x10 (not 0x13, hardware adds RPL 3)
+    // SYSCALL_CS = 0x08
+
+    const star_value: u64 = (@as(u64, 0x10) << 48) | (@as(u64, 0x08) << 32);
     cpu.writeMSR(MSR_STAR, star_value);
 
-    const entry_addr = @intFromPtr(&syscallEntryStub);
+    // LSTAR: Syscall entry point
+    const entry_addr = @intFromPtr(&syscallEntry);
     cpu.writeMSR(MSR_LSTAR, entry_addr);
+
+    // CSTAR: Compatibility mode entry (not used)
+    cpu.writeMSR(MSR_CSTAR, 0);
+
+    // FMASK: RFLAGS mask (clear IF to disable interrupts during syscall)
     cpu.writeMSR(MSR_FMASK, FMASK_VALUE);
 
+    // Set up kernel stack in per-CPU data
+    per_cpu.kernel_rsp = gdt.getKernelStack();
+
     registerDefaults();
-    console.log(.info, "Syscall interface initialized", .{});
+    console.log(.info, "Syscall interface initialized (LSTAR={x})", .{entry_addr});
 }
 
 /// Register a syscall handler
@@ -143,6 +381,16 @@ fn registerDefaults() void {
 
     // Debug
     register(SYS_DEBUG_PRINT, &sysDebugPrint);
+
+    // Device Capabilities
+    register(SYS_REQUEST_IOPORT, &sysRequestIoport);
+    register(SYS_RELEASE_IOPORT, &sysReleaseIoport);
+    register(SYS_REQUEST_IRQ, &sysRequestIrq);
+    register(SYS_RELEASE_IRQ, &sysReleaseIrq);
+    register(SYS_INB, &sysInb);
+    register(SYS_OUTB, &sysOutb);
+    register(SYS_INW, &sysInw);
+    register(SYS_OUTW, &sysOutw);
 }
 
 /// Syscall dispatch
@@ -167,16 +415,17 @@ pub fn syscallDispatch(
     return handler(arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
-fn syscallEntryStub() void {
-    // Placeholder - actual syscall entry would need naked function
-}
-
 pub fn setKernelStack(rsp: u64) void {
     per_cpu.kernel_rsp = rsp;
+    gdt.setKernelStack(rsp);
 }
 
 pub fn setCurrentThread(thread: ?*Thread) void {
     per_cpu.current_thread = thread;
+}
+
+pub fn getCurrentThread() ?*Thread {
+    return per_cpu.current_thread;
 }
 
 // ============= Memory Syscalls =============
@@ -245,11 +494,50 @@ fn sysMprotect(addr: u64, length: u64, prot: u64, _: u64, _: u64, _: u64) i64 {
 
 // ============= Process Syscalls =============
 
-fn sysSpawn(path_ptr: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
-    _ = path_ptr;
-    // TODO: Need filesystem to load ELF from path
-    // For now, return error - spawn needs VFS server
-    console.log(.debug, "sys_spawn: VFS not implemented", .{});
+fn sysSpawn(path_ptr: u64, argv_ptr: u64, envp_ptr: u64, _: u64, _: u64, _: u64) i64 {
+    _ = argv_ptr;
+    _ = envp_ptr;
+
+    // Get path string
+    const path: [*]const u8 = @ptrFromInt(path_ptr);
+
+    // For RAM disk VFS, we'd look up the file here
+    // For now, try to load from built-in binaries
+    const binary_data = vfs.lookup(path) orelse {
+        console.log(.warn, "sys_spawn: file not found", .{});
+        return -1;
+    };
+
+    // Create new process
+    const current = context.getCurrent() orelse return -1;
+    const child = process_mod.create(current.process.pid) orelse {
+        console.log(.err, "sys_spawn: failed to create process", .{});
+        return -1;
+    };
+
+    // Load ELF into child's address space
+    if (child.address_space) |*space| {
+        const load_result = elf.load(binary_data, space) catch {
+            console.log(.err, "sys_spawn: ELF load failed", .{});
+            process_mod.free(child.pid);
+            return -1;
+        };
+
+        // Create main thread
+        const child_thread = thread_mod.create(child) orelse {
+            console.log(.err, "sys_spawn: failed to create thread", .{});
+            process_mod.free(child.pid);
+            return -1;
+        };
+
+        // Set up thread to start at ELF entry
+        child_thread.setEntry(load_result.entry_point, load_result.stack_pointer);
+        child_thread.state = .ready;
+        scheduler.enqueue(child_thread);
+
+        return @intCast(child.pid);
+    }
+
     return -1;
 }
 
@@ -291,10 +579,40 @@ fn sysFork(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     return @intCast(child_proc.pid);
 }
 
-fn sysExec(path_ptr: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
-    _ = path_ptr;
-    // TODO: Need filesystem
-    console.log(.debug, "sys_exec: VFS not implemented", .{});
+fn sysExec(path_ptr: u64, argv_ptr: u64, envp_ptr: u64, _: u64, _: u64, _: u64) i64 {
+    _ = argv_ptr;
+    _ = envp_ptr;
+
+    const current = context.getCurrent() orelse return -1;
+    const path: [*]const u8 = @ptrFromInt(path_ptr);
+
+    // Look up binary
+    const binary_data = vfs.lookup(path) orelse {
+        console.log(.warn, "sys_exec: file not found", .{});
+        return -1;
+    };
+
+    // Clear current address space (except kernel mappings)
+    if (current.process.address_space) |*space| {
+        // TODO: properly clear user mappings
+
+        // Load new ELF
+        const load_result = elf.load(binary_data, space) catch {
+            console.log(.err, "sys_exec: ELF load failed", .{});
+            return -1;
+        };
+
+        // Update thread to start at new entry point
+        current.setEntry(load_result.entry_point, load_result.stack_pointer);
+        current.context = thread_mod.Context.init();
+        current.context.rip = load_result.entry_point;
+        current.context.rsp = load_result.stack_pointer;
+
+        // exec doesn't return to caller - jump to new entry
+        // This is handled by scheduler returning to new context
+        return 0;
+    }
+
     return -1;
 }
 
@@ -481,6 +799,145 @@ fn sysDebugPrint(ptr: u64, len: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     return @intCast(safe_len);
 }
 
+// ============= Device Capability Syscalls =============
+
+/// Request access to an I/O port range
+/// Args: base_port, count
+/// Returns: 0 on success, -1 on error
+fn sysRequestIoport(base: u64, count: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const port: u16 = @truncate(base);
+    const port_count: u16 = @truncate(count);
+
+    // Try to reserve the ports globally
+    capability.reservePorts(port, port_count, process) catch {
+        return -1; // Ports in use or too many reservations
+    };
+
+    // Grant to process capability set
+    process.capabilities.grantIoPorts(port, port_count) catch {
+        capability.releasePorts(port, process);
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Release I/O port access
+fn sysReleaseIoport(base: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const port: u16 = @truncate(base);
+
+    if (process.capabilities.revokeIoPorts(port)) {
+        capability.releasePorts(port, process);
+        return 0;
+    }
+    return -1;
+}
+
+/// Request an IRQ
+/// Args: irq_number, notification_port
+fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const irq_num: u8 = @truncate(irq);
+    const port: u32 = @truncate(notify_port);
+
+    // Claim IRQ globally
+    capability.claimIrq(irq_num, process) catch {
+        return -1; // IRQ in use
+    };
+
+    // Grant to process
+    process.capabilities.grantIrq(irq_num, port) catch {
+        capability.releaseIrq(irq_num, process);
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Release an IRQ
+fn sysReleaseIrq(irq: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const irq_num: u8 = @truncate(irq);
+
+    if (process.capabilities.revokeIrq(irq_num)) {
+        capability.releaseIrq(irq_num, process);
+        return 0;
+    }
+    return -1;
+}
+
+/// Read a byte from an I/O port (with capability check)
+fn sysInb(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    // Check capability
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1; // Permission denied
+    }
+
+    // Perform the I/O
+    const value = cpu.inb(p);
+    return @as(i64, value);
+}
+
+/// Write a byte to an I/O port (with capability check)
+fn sysOutb(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1;
+    }
+
+    cpu.outb(p, @truncate(value));
+    return 0;
+}
+
+/// Read a word from an I/O port
+fn sysInw(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1;
+    }
+
+    const value = cpu.inw(p);
+    return @as(i64, value);
+}
+
+/// Write a word to an I/O port
+fn sysOutw(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = per_cpu.current_thread orelse return -1;
+    const process = thread.process;
+
+    const p: u16 = @truncate(port);
+
+    if (!process.capabilities.canAccessPort(p)) {
+        return -1;
+    }
+
+    cpu.outw(p, @truncate(value));
+    return 0;
+}
+
 /// Test syscall dispatch (kernel-mode test)
 pub fn testDispatch() void {
     console.log(.debug, "Syscall test: testing dispatch table...", .{});
@@ -495,4 +952,63 @@ pub fn testDispatch() void {
     console.log(.debug, "  invalid syscall returned: {}", .{invalid});
 
     console.log(.info, "Syscall dispatch test passed", .{});
+}
+
+// ============= VFS Interface (RAM disk) =============
+
+const vfs = struct {
+    // Built-in binaries (embedded at compile time or loaded by bootloader)
+    const BinaryEntry = struct {
+        name: []const u8,
+        data: []const u8,
+    };
+
+    var binaries: [16]?BinaryEntry = [_]?BinaryEntry{null} ** 16;
+    var binary_count: usize = 0;
+
+    /// Register a binary
+    pub fn registerBinary(name: []const u8, data: []const u8) void {
+        if (binary_count < binaries.len) {
+            binaries[binary_count] = .{ .name = name, .data = data };
+            binary_count += 1;
+        }
+    }
+
+    /// Look up a binary by path
+    pub fn lookup(path: [*]const u8) ?[]const u8 {
+        // Convert null-terminated path to slice
+        var len: usize = 0;
+        while (path[len] != 0 and len < 256) : (len += 1) {}
+        const path_slice = path[0..len];
+
+        // Strip leading /
+        const name = if (path_slice.len > 0 and path_slice[0] == '/')
+            path_slice[1..]
+        else
+            path_slice;
+
+        // Search binaries
+        for (binaries) |maybe_entry| {
+            if (maybe_entry) |entry| {
+                if (strEq(entry.name, name)) {
+                    return entry.data;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn strEq(a: []const u8, b: []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |ca, cb| {
+            if (ca != cb) return false;
+        }
+        return true;
+    }
+};
+
+/// Register a binary for VFS
+pub fn registerBinary(name: []const u8, data: []const u8) void {
+    vfs.registerBinary(name, data);
 }

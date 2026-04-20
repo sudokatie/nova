@@ -173,7 +173,7 @@ fn switchContexts(old_rsp_ptr: *u64, new_rsp: u64) void {
         \\pushfq
         \\
         // Save current RSP to old thread
-        \\movq %%rsp, (%[old_rsp_ptr])
+        \\movq %%rsp, %[old_rsp_mem]
         \\
         // Load new thread's RSP
         \\movq %[new_rsp], %%rsp
@@ -187,9 +187,10 @@ fn switchContexts(old_rsp_ptr: *u64, new_rsp: u64) void {
         \\popq %%rbx
         \\popq %%rbp
         :
-        : [old_rsp_ptr] "r" (old_rsp_ptr),
+        : [old_rsp_mem] "m" (old_rsp_ptr.*),
           [new_rsp] "r" (new_rsp),
-        : .{ .memory = true, .cc = true });
+        : .{ .memory = true, .cc = true }
+    );
 }
 
 /// Load a new context without saving old one (for first switch)

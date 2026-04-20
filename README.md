@@ -13,9 +13,10 @@ Nova is a learning project. It's not trying to replace Linux. It's trying to dem
 - Boots on real x86-64 hardware (and QEMU)
 - Higher-half kernel with proper virtual memory
 - Preemptive multitasking scheduler
-- L4-style synchronous IPC
+- L4-style synchronous IPC with capability-based access control
 - Runs userspace programs
-- That's it. That's the whole kernel.
+- Userspace drivers (keyboard via IPC)
+- Virtual filesystem server with ramfs
 
 Everything else (filesystems, networking, drivers) runs in userspace servers. Microkernel philosophy: the kernel should be as small as possible while still being useful.
 

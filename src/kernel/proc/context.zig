@@ -159,38 +159,13 @@ pub fn contextSwitch(old: ?*Thread, new: *Thread) void {
     }
 }
 
+// External assembly function from asm_stubs.s
+extern fn asm_switch_contexts(old_rsp_ptr: *u64, new_rsp: u64) void;
+
 /// Assembly routine to switch between two contexts
 /// Saves callee-saved registers to old stack, loads new stack, restores registers
 fn switchContexts(old_rsp_ptr: *u64, new_rsp: u64) void {
-    asm volatile (
-    // Save callee-saved registers on current stack
-        \\pushq %%rbp
-        \\pushq %%rbx
-        \\pushq %%r12
-        \\pushq %%r13
-        \\pushq %%r14
-        \\pushq %%r15
-        \\pushfq
-        \\
-        // Save current RSP to old thread
-        \\movq %%rsp, %[old_rsp_mem]
-        \\
-        // Load new thread's RSP
-        \\movq %[new_rsp], %%rsp
-        \\
-        // Restore callee-saved registers from new stack
-        \\popfq
-        \\popq %%r15
-        \\popq %%r14
-        \\popq %%r13
-        \\popq %%r12
-        \\popq %%rbx
-        \\popq %%rbp
-        :
-        : [old_rsp_mem] "m" (old_rsp_ptr.*),
-          [new_rsp] "r" (new_rsp),
-        : .{ .memory = true, .cc = true }
-    );
+    asm_switch_contexts(old_rsp_ptr, new_rsp);
 }
 
 /// Load a new context without saving old one (for first switch)
@@ -286,4 +261,74 @@ pub fn yield() void {
 /// Simple switch without full context frame (for cooperative switching)
 pub fn switchTo(old: ?*Thread, new: *Thread) void {
     contextSwitch(old, new);
+}
+
+/// Initialize a thread's context for first run in userspace
+/// Sets up the kernel stack so context switch will iret to user mode
+pub fn initUserContext(thread: *Thread, entry: u64, user_stack: u64) void {
+    const gdt_mod = @import("../arch/x86_64/gdt.zig");
+
+    // Stack grows down, start at top
+    var sp = thread.kernel_stack_top;
+
+    // Align stack to 16 bytes
+    sp = sp & ~@as(u64, 0xF);
+
+    // Push interrupt frame for iret to user mode
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = gdt_mod.USER_DS; // SS (user data, ring 3)
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = user_stack; // User RSP
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0x202; // RFLAGS (IF enabled)
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = gdt_mod.USER_CS; // CS (user code, ring 3)
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = entry; // User RIP
+
+    // Push error code
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0;
+
+    // Push general purpose registers (zeroed for clean start)
+    // RAX through R15 in the order loadContext expects
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RAX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RCX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RDX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RSI
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RDI
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R8
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R9
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R10
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R11
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RBX
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // RBP
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R12
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R13
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R14
+    sp -= 8;
+    @as(*u64, @ptrFromInt(sp)).* = 0; // R15
+
+    thread.kernel_rsp = sp;
+
+    // Also set up the context struct for debugging
+    thread.context.rip = entry;
+    thread.context.rsp = user_stack;
+    thread.context.rflags = 0x202;
+    thread.context.cs = gdt_mod.USER_CS;
+    thread.context.ss = gdt_mod.USER_DS;
 }

@@ -109,124 +109,18 @@ pub const PerCpuData = extern struct {
 // Per-CPU data (one for each CPU, currently just one)
 pub export var per_cpu: PerCpuData linksection(".data") = PerCpuData.init();
 
-// ============= Syscall Entry Point =============
+// ============= External Assembly Syscall Entry =============
 
-/// Syscall entry point (naked function)
-/// ABI: syscall number in RAX, args in RDI, RSI, RDX, R10, R8, R9
-/// RCX contains return RIP, R11 contains RFLAGS
-pub fn syscallEntry() callconv(.naked) void {
-    // Save user RSP and switch to kernel stack
-    // The swapgs instruction would be used with per-CPU data in GS base
-    // For simplicity, we use a global variable
+// External assembly from asm_stubs.s
+extern fn asm_syscall_entry() callconv(.naked) void;
 
-    // Pre-calculated offsets: 14*8=112, 13*8=104, 5*8=40, 7*8=56, 6*8=48, 15*8=120
-    // We use specific registers: r12 for per_cpu_ptr, r13 for dispatch_fn
-    // These are callee-saved so they survive the function call
-    asm volatile (
-        // Save R11 (contains RFLAGS) to stack temporarily using red zone
-        \\movq %%r11, -8(%%rsp)
-        \\
-        // Save R12 and R13 which we'll use for our pointers
-        \\movq %%r12, -16(%%rsp)
-        \\movq %%r13, -24(%%rsp)
-        \\
-        // Load per_cpu address into r12
-        \\movq %[per_cpu_ptr], %%r12
-        // Load dispatch_fn into r13
-        \\movq %[dispatch_fn], %%r13
-        \\
-        // Save user stack pointer (per_cpu.user_rsp is at offset 8)
-        \\movq %%rsp, 8(%%r12)
-        \\
-        // Load kernel stack pointer (per_cpu.kernel_rsp is at offset 0)
-        \\movq (%%r12), %%rsp
-        \\
-        // Push interrupt frame (for SYSRET compatibility)
-        \\pushq $0x23               // User SS (0x20 | 3)
-        \\pushq 8(%%r12)            // User RSP (from per_cpu)
-        \\
-        // Reload original R11 (RFLAGS) - it was saved at user_rsp-8
-        \\movq 8(%%r12), %%r11      // Get user_rsp
-        \\movq -8(%%r11), %%r11     // Get saved RFLAGS
-        \\pushq %%r11               // RFLAGS (original R11)
-        \\pushq $0x1b               // User CS (0x18 | 3)
-        \\pushq %%rcx               // User RIP (from RCX)
-        \\
-        // Push error code (0 for syscall)
-        \\pushq $0
-        \\
-        // Push all general purpose registers
-        \\pushq %%rax
-        \\pushq %%rbx
-        \\pushq %%rcx
-        \\pushq %%rdx
-        \\pushq %%rsi
-        \\pushq %%rdi
-        \\pushq %%rbp
-        \\pushq %%r8
-        \\pushq %%r9
-        \\pushq %%r10
-        \\pushq %%r11
-        // Restore and push original r12, r13 from where we saved them
-        \\movq 8(%%r12), %%r11      // Get user_rsp again
-        \\pushq -16(%%r11)          // Original r12
-        \\pushq -24(%%r11)          // Original r13
-        \\pushq %%r14
-        \\pushq %%r15
-        \\
-        // Move R10 to RCX (R10 is 4th arg in syscall ABI, RCX is clobbered)
-        \\movq %%r10, %%rcx
-        \\
-        // Call the dispatch function
-        // Args already in: RDI, RSI, RDX, RCX (was R10), R8, R9
-        // Syscall number in RAX
-        // Stack offsets: r15=0, r14=8, r13=16, r12=24, r11=32, r10=40, r9=48, r8=56
-        //                rbp=64, rdi=72, rsi=80, rdx=88, rcx=96, rbx=104, rax=112
-        \\movq %%rax, %%rdi         // syscall_num -> arg1
-        \\movq 112(%%rsp), %%rsi    // original RDI -> arg2 (was at 14*8)
-        \\movq 104(%%rsp), %%rdx    // original RSI -> arg3 (was at 13*8)
-        \\movq 40(%%rsp), %%rcx     // original R10 -> arg4 (was at 5*8)
-        \\movq 56(%%rsp), %%r8      // original R8 -> arg5 (was at 7*8)
-        \\movq 48(%%rsp), %%r9      // original R9 -> arg6 (was at 6*8)
-        \\
-        \\call *%%r13               // Call dispatch function
-        \\
-        // Return value in RAX - store it (was at 15*8=120)
-        \\movq %%rax, 120(%%rsp)
-        \\
-        // Pop registers
-        \\popq %%r15
-        \\popq %%r14
-        \\popq %%r13
-        \\popq %%r12
-        \\popq %%r11
-        \\popq %%r10
-        \\popq %%r9
-        \\popq %%r8
-        \\popq %%rbp
-        \\popq %%rdi
-        \\popq %%rsi
-        \\popq %%rdx
-        \\popq %%rcx
-        \\popq %%rbx
-        \\popq %%rax
-        \\
-        // Skip error code
-        \\addq $8, %%rsp
-        \\
-        // Pop interrupt frame and return
-        \\popq %%rcx               // RIP -> RCX for SYSRET
-        \\addq $8, %%rsp           // Skip CS
-        \\popq %%r11               // RFLAGS -> R11 for SYSRET
-        \\popq %%rsp               // Restore user RSP
-        \\
-        // Return to userspace
-        \\sysretq
-        :
-        : [per_cpu_ptr] "r" (&per_cpu),
-          [dispatch_fn] "r" (&syscallDispatchWrapper),
-    );
-}
+// Per-CPU data used by assembly syscall entry (defined in asm_stubs.s)
+const AsmPerCpu = extern struct {
+    kernel_rsp: u64,
+    user_rsp: u64,
+};
+extern var syscall_per_cpu: AsmPerCpu;
+extern var syscall_dispatch_ptr: usize;
 
 /// Wrapper function called from assembly
 export fn syscallDispatchWrapper(
@@ -349,8 +243,8 @@ pub fn init() void {
     const star_value: u64 = (@as(u64, 0x10) << 48) | (@as(u64, 0x08) << 32);
     cpu.writeMSR(MSR_STAR, star_value);
 
-    // LSTAR: Syscall entry point
-    const entry_addr = @intFromPtr(&syscallEntry);
+    // LSTAR: Syscall entry point (using external assembly)
+    const entry_addr = @intFromPtr(&asm_syscall_entry);
     cpu.writeMSR(MSR_LSTAR, entry_addr);
 
     // CSTAR: Compatibility mode entry (not used)
@@ -359,8 +253,12 @@ pub fn init() void {
     // FMASK: RFLAGS mask (clear IF to disable interrupts during syscall)
     cpu.writeMSR(MSR_FMASK, FMASK_VALUE);
 
-    // Set up kernel stack in per-CPU data
+    // Set up kernel stack in per-CPU data (both Zig and assembly versions)
     per_cpu.kernel_rsp = gdt.getKernelStack();
+    syscall_per_cpu.kernel_rsp = gdt.getKernelStack();
+
+    // Set dispatch function pointer for assembly
+    syscall_dispatch_ptr = @intFromPtr(&syscallDispatchWrapper);
 
     registerDefaults();
     console.log(.info, "Syscall interface initialized (LSTAR={x})", .{entry_addr});

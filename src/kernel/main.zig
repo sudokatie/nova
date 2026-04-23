@@ -23,6 +23,7 @@ const syscall = @import("arch/x86_64/syscall.zig");
 const ipc = @import("ipc/message.zig");
 const integration = @import("test/integration.zig");
 const cpu = @import("arch/x86_64/cpu.zig");
+const init = @import("init.zig");
 
 // Limine requests - these are filled in by the bootloader
 pub export var base_revision: limine.BaseRevision linksection(".limine_reqs") = .{ .revision = 2 };
@@ -176,24 +177,6 @@ export fn kmain() noreturn {
     console.log(.info, "Initializing IPC...", .{});
     ipc.init();
 
-    // Test: create a process and thread
-    console.log(.debug, "Process test: creating process...", .{});
-    if (process.create(0)) |proc| {
-        proc.setName("init");
-        console.log(.debug, "  Created process {} ({})", .{ proc.pid, proc.getName() });
-
-        if (thread.create(proc)) |t| {
-            console.log(.debug, "  Created thread {} (stack at {x})", .{ t.tid, t.kernel_stack_top });
-            // Add to run queue
-            scheduler.enqueue(t);
-        }
-        console.log(.info, "Process test passed: {} processes, {} threads, {} ready", .{
-            process.getCount(),
-            thread.getCount(),
-            scheduler.getReadyCount(),
-        });
-    }
-
     // Run integration tests
     integration.runAll();
 
@@ -202,35 +185,28 @@ export fn kmain() noreturn {
     console.println("Boot successful.", .{});
     console.println("", .{});
 
-    // Test keyboard - interactive loop
-    console.println("Keyboard test: type something (Ctrl+C to exit test)...", .{});
-
-    // Enable interrupts
-    cpu.enableInterrupts();
-
-    // Simple keyboard echo loop
-    var key_count: u32 = 0;
-    while (key_count < 100) { // Exit after 100 keys or timeout
-        const c = keyboard.getChar();
-        if (c != 0) {
-            if (c == 0x03) { // Ctrl+C
-                console.println("", .{});
-                console.println("Ctrl+C received, exiting keyboard test.", .{});
-                break;
-            }
-            console.putChar(c);
-            key_count += 1;
-        }
-
-        // Brief halt to save power
-        asm volatile ("hlt");
+    // Spawn init process (PID 1)
+    if (!init.spawnInit()) {
+        panic_handler.panic_msg("Failed to spawn init process");
     }
 
-    console.println("", .{});
-    console.println("System halted. Press reset to restart.", .{});
+    console.log(.info, "Process stats: {} processes, {} threads, {} ready", .{
+        process.getCount(),
+        thread.getCount(),
+        scheduler.getReadyCount(),
+    });
 
-    // Halt - we don't have a full scheduler running yet
-    panic_handler.halt();
+    // Enable scheduler and interrupts
+    console.println("Starting scheduler...", .{});
+    scheduler.enable();
+    cpu.enableInterrupts();
+
+    // Enter idle loop - scheduler will preempt to run init
+    // The timer interrupt triggers scheduler.tick() which handles context switches
+    console.println("Kernel entering idle loop. Init should run shortly.", .{});
+    while (true) {
+        asm volatile ("hlt");
+    }
 }
 
 // Zig builtin panic handler - forward to our panic module

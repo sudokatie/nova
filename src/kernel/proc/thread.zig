@@ -11,6 +11,28 @@ const Pid = @import("process.zig").Pid;
 pub const KERNEL_STACK_SIZE: u64 = 8192;
 pub const KERNEL_STACK_PAGES: u64 = 2;
 
+// FPU/SSE state size for FXSAVE/FXRSTOR (512 bytes, 16-byte aligned)
+pub const FPU_STATE_SIZE: usize = 512;
+
+/// FPU/SSE state saved by FXSAVE instruction
+/// 512 bytes, must be 16-byte aligned
+pub const FpuState = extern struct {
+    data: [FPU_STATE_SIZE]u8 align(16),
+
+    pub fn init() FpuState {
+        // Initialize to a clean FPU state
+        // FXSAVE format: first 2 bytes are FCW (control word)
+        // Default FCW: 0x037F (all exceptions masked, double precision)
+        var state = FpuState{ .data = [_]u8{0} ** FPU_STATE_SIZE };
+        state.data[0] = 0x7F;
+        state.data[1] = 0x03;
+        // MXCSR at offset 24: default 0x1F80 (all SSE exceptions masked)
+        state.data[24] = 0x80;
+        state.data[25] = 0x1F;
+        return state;
+    }
+};
+
 // Thread ID type
 pub const Tid = u32;
 
@@ -90,6 +112,8 @@ pub const Thread = struct {
     priority: u8,
     time_slice: u32, // Remaining time slice in ticks
     sleep_until: u64, // Wake up at this tick count (if sleeping)
+    fpu_state: FpuState, // FPU/SSE state for context switches
+    fpu_initialized: bool, // Whether FPU state has been initialized
 
     /// Initialize a new thread
     pub fn init(tid: Tid, process: *Process) Thread {
@@ -104,6 +128,8 @@ pub const Thread = struct {
             .priority = 128, // Default priority
             .time_slice = 5, // Default time slice (50ms at 100Hz)
             .sleep_until = 0,
+            .fpu_state = FpuState.init(),
+            .fpu_initialized = false,
         };
     }
 

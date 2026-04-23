@@ -281,10 +281,10 @@ asm_switch_contexts:
     pushq %r14
     pushq %r15
     pushfq
-    
+
     movq %rsp, (%rdi)       # Save current RSP
     movq %rsi, %rsp         # Load new RSP
-    
+
     popfq
     popq %r15
     popq %r14
@@ -292,4 +292,28 @@ asm_switch_contexts:
     popq %r12
     popq %rbx
     popq %rbp
+    ret
+
+# FPU/SSE state save/restore using FXSAVE/FXRSTOR
+# These require 16-byte aligned buffers of 512 bytes
+
+# void asm_fxsave(void* fpu_state_ptr)
+# Saves FPU/MMX/SSE state to the 512-byte buffer at fpu_state_ptr
+.global asm_fxsave
+asm_fxsave:
+    fxsave (%rdi)
+    ret
+
+# void asm_fxrstor(void* fpu_state_ptr)
+# Restores FPU/MMX/SSE state from the 512-byte buffer at fpu_state_ptr
+.global asm_fxrstor
+asm_fxrstor:
+    fxrstor (%rdi)
+    ret
+
+# void asm_fninit()
+# Initialize FPU to default state (called for fresh threads)
+.global asm_fninit
+asm_fninit:
+    fninit
     ret

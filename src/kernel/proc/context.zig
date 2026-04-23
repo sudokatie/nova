@@ -6,9 +6,15 @@
 const Thread = @import("thread.zig").Thread;
 const Context = @import("thread.zig").Context;
 const ThreadState = @import("thread.zig").ThreadState;
+const FpuState = @import("thread.zig").FpuState;
 const vmm = @import("../mm/vmm.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
 const console = @import("../lib/console.zig");
+
+// External assembly functions for FPU state save/restore
+extern fn asm_fxsave(fpu_state_ptr: *FpuState) void;
+extern fn asm_fxrstor(fpu_state_ptr: *const FpuState) void;
+extern fn asm_fninit() void;
 
 // Current running thread (per-CPU, but we only have one CPU)
 var current_thread: ?*Thread = null;
@@ -132,6 +138,12 @@ pub fn contextSwitch(old: ?*Thread, new: *Thread) void {
     }
     new.state = .running;
 
+    // Save FPU/SSE state of old thread before switching
+    // This preserves x87, MMX, and XMM registers across context switches
+    if (old) |o| {
+        saveFpuState(o);
+    }
+
     // Switch address space if different process
     const need_space_switch = if (old) |o|
         o.process != new.process
@@ -146,6 +158,9 @@ pub fn contextSwitch(old: ?*Thread, new: *Thread) void {
 
     // Update kernel stack in TSS for syscalls/interrupts
     gdt.setKernelStack(new.kernel_stack_top);
+
+    // Restore FPU/SSE state of new thread
+    restoreFpuState(new);
 
     // Update current thread
     current_thread = new;
@@ -240,16 +255,28 @@ pub fn switchToUser(entry: u64, user_stack: u64, arg: u64) noreturn {
     unreachable;
 }
 
-/// Save FPU/SSE state
+/// Save FPU/SSE state for the given thread
+/// Called before switching away from a thread to preserve its FPU registers
 pub fn saveFpuState(thread: *Thread) void {
-    _ = thread;
-    // TODO: FXSAVE to thread's FPU buffer when we support FPU
+    // FXSAVE stores x87 FPU, MMX, and SSE state (512 bytes)
+    // The buffer must be 16-byte aligned (enforced by FpuState struct)
+    asm_fxsave(&thread.fpu_state);
+    thread.fpu_initialized = true;
 }
 
-/// Restore FPU/SSE state
+/// Restore FPU/SSE state for the given thread
+/// Called after switching to a thread to restore its FPU registers
 pub fn restoreFpuState(thread: *Thread) void {
-    _ = thread;
-    // TODO: FXRSTOR from thread's FPU buffer when we support FPU
+    if (thread.fpu_initialized) {
+        // Restore previously saved FPU state
+        asm_fxrstor(&thread.fpu_state);
+    } else {
+        // First time running this thread: initialize FPU to clean state
+        // then save it so subsequent restores work correctly
+        asm_fninit();
+        asm_fxsave(&thread.fpu_state);
+        thread.fpu_initialized = true;
+    }
 }
 
 /// Yield the current thread's remaining time slice

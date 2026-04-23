@@ -35,8 +35,9 @@ pub const SYS_REPLY: u64 = 33;
 pub const SYS_SLEEP: u64 = 40;
 pub const SYS_GETTIME: u64 = 41;
 
-// Debug
+// Debug/Console
 pub const SYS_DEBUG_PRINT: u64 = 50;
+pub const SYS_READ_CHAR: u64 = 51;
 
 // Device Capabilities
 pub const SYS_REQUEST_IOPORT: u64 = 60;
@@ -291,6 +292,12 @@ pub fn gettime() u64 {
 /// Print a debug message
 pub fn debug_print(msg: []const u8) isize {
     return @intCast(syscall2(SYS_DEBUG_PRINT, @intFromPtr(msg.ptr), msg.len));
+}
+
+/// Read a character from keyboard (non-blocking)
+/// Returns the character value (0-255), or -1 if no input available
+pub fn read_char() i32 {
+    return @intCast(syscall0(SYS_READ_CHAR));
 }
 
 // ============= Device Capability Syscalls =============

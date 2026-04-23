@@ -89,13 +89,12 @@ fn readLine(buf: []u8) usize {
 
 /// Get a character from input (returns 0 if none available)
 fn getChar() u8 {
-    // In a full implementation:
-    // 1. Send MSG_GETCHAR to console server
-    // 2. Receive response with character
-    // For now, return 0 (no input) and let readLine yield
-
-    // Placeholder: This would be IPC to console server
-    return 0;
+    // Read from kernel keyboard buffer via syscall
+    const result = syscall.read_char();
+    if (result < 0) {
+        return 0; // No input available
+    }
+    return @intCast(result);
 }
 
 /// Add command to history

@@ -18,6 +18,7 @@ const message = @import("../../ipc/message.zig");
 const capability = @import("../../ipc/capability.zig");
 const elf = @import("../../loader/elf.zig");
 const timer = @import("../../drivers/timer.zig");
+const keyboard = @import("../../drivers/keyboard.zig");
 
 // MSR addresses for syscall
 const MSR_EFER: u32 = 0xC0000080;
@@ -77,8 +78,9 @@ pub const SYS_REPLY: usize = 33;
 pub const SYS_SLEEP: usize = 40;
 pub const SYS_GETTIME: usize = 41;
 
-// Debug
+// Debug/Console
 pub const SYS_DEBUG_PRINT: usize = 50;
+pub const SYS_READ_CHAR: usize = 51;
 
 // Device Capabilities
 pub const SYS_REQUEST_IOPORT: usize = 60;
@@ -303,8 +305,9 @@ fn registerDefaults() void {
     register(SYS_SLEEP, &sysSleep);
     register(SYS_GETTIME, &sysGettime);
 
-    // Debug
+    // Debug/Console
     register(SYS_DEBUG_PRINT, &sysDebugPrint);
+    register(SYS_READ_CHAR, &sysReadChar);
 
     // Device Capabilities
     register(SYS_REQUEST_IOPORT, &sysRequestIoport);
@@ -721,6 +724,16 @@ fn sysDebugPrint(ptr: u64, len: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     }
 
     return @intCast(safe_len);
+}
+
+/// Read a character from keyboard buffer (non-blocking)
+/// Returns: character value (0-255), or -1 if buffer empty
+fn sysReadChar(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const c = keyboard.getChar();
+    if (c == 0) {
+        return -1; // No character available
+    }
+    return @as(i64, c);
 }
 
 // ============= Device Capability Syscalls =============

@@ -546,8 +546,33 @@ fn sysExec(path_ptr: u64, argv_ptr: u64, envp_ptr: u64, _: u64, _: u64, _: u64) 
 fn sysExit(exit_code: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     console.log(.debug, "sys_exit: code {}", .{exit_code});
     if (context.getCurrent()) |thread| {
-        thread.process.terminate(@intCast(exit_code));
+        const proc = thread.process;
+        const my_pid = proc.pid;
+
+        // Reparent any children to init (PID 1) before we become zombie
+        // Skip if we ARE init (PID 1)
+        if (my_pid != 1) {
+            process_mod.reparentChildren(my_pid, 1);
+        }
+
+        proc.terminate(@intCast(exit_code));
         thread.terminate();
+
+        // Wake up parent if blocked waiting for us
+        if (proc.parent_pid) |parent_pid| {
+            if (process_mod.get(parent_pid)) |parent| {
+                // Check parent's threads for any blocked on wait
+                for (parent.threads) |maybe_thread| {
+                    if (maybe_thread) |t| {
+                        if (t.state == .blocked) {
+                            t.unblock();
+                            scheduler.enqueue(t);
+                        }
+                    }
+                }
+            }
+        }
+
         scheduler.schedule();
     }
     return 0;
@@ -555,33 +580,68 @@ fn sysExit(exit_code: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
 fn sysWait(pid: u64, status_ptr: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     const current = context.getCurrent() orelse return -1;
-    const target_pid: u32 = @intCast(pid);
+    const my_pid = current.process.pid;
 
-    // Find child process
-    if (process_mod.get(target_pid)) |child| {
-        // Check if it's our child
-        if (child.parent_pid != current.process.pid) {
-            return -1; // Not our child
-        }
+    // Handle pid == -1: wait for any child
+    // Handle pid > 0: wait for specific child
+    const target_pid_signed: i32 = @bitCast(@as(u32, @truncate(pid)));
 
-        // Wait for child to become zombie
-        while (child.state != .zombie and child.state != .terminated) {
+    if (target_pid_signed == -1) {
+        // Wait for any child to become zombie
+        while (true) {
+            // First check if we have any children at all
+            if (!process_mod.hasChildren(my_pid)) {
+                return -1; // No children
+            }
+
+            // Look for a zombie child
+            if (process_mod.findZombieChild(my_pid)) |zombie_pid| {
+                if (process_mod.get(zombie_pid)) |child| {
+                    // Store exit status
+                    if (status_ptr != 0) {
+                        const status: *i32 = @ptrFromInt(status_ptr);
+                        status.* = child.exit_code;
+                    }
+
+                    // Clean up child
+                    process_mod.free(zombie_pid);
+                    return @intCast(zombie_pid);
+                }
+            }
+
+            // No zombie yet, block and wait to be woken
             current.state = .blocked;
             scheduler.schedule();
         }
+    } else {
+        // Wait for specific child
+        const target_pid: u32 = @intCast(target_pid_signed);
 
-        // Store exit status
-        if (status_ptr != 0) {
-            const status: *i32 = @ptrFromInt(status_ptr);
-            status.* = child.exit_code;
+        if (process_mod.get(target_pid)) |child| {
+            // Check if it's our child
+            if (child.parent_pid != my_pid) {
+                return -1; // Not our child
+            }
+
+            // Wait for child to become zombie
+            while (child.state != .zombie and child.state != .terminated) {
+                current.state = .blocked;
+                scheduler.schedule();
+            }
+
+            // Store exit status
+            if (status_ptr != 0) {
+                const status: *i32 = @ptrFromInt(status_ptr);
+                status.* = child.exit_code;
+            }
+
+            // Clean up child
+            process_mod.free(target_pid);
+            return @intCast(target_pid);
         }
 
-        // Clean up child
-        process_mod.free(target_pid);
-        return @intCast(target_pid);
+        return -1;
     }
-
-    return -1;
 }
 
 fn sysGetpid(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {

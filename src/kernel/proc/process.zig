@@ -203,3 +203,41 @@ pub fn getCount() usize {
     }
     return count;
 }
+
+/// Find any zombie child of the given parent.
+/// Returns the child PID if found, null otherwise.
+pub fn findZombieChild(parent_pid: Pid) ?Pid {
+    for (process_table, 0..) |maybe_proc, idx| {
+        if (maybe_proc) |proc| {
+            if (proc.parent_pid == parent_pid and proc.state == .zombie) {
+                return @intCast(idx);
+            }
+        }
+    }
+    return null;
+}
+
+/// Check if a process has any children (zombie or otherwise).
+pub fn hasChildren(parent_pid: Pid) bool {
+    for (process_table) |maybe_proc| {
+        if (maybe_proc) |proc| {
+            if (proc.parent_pid == parent_pid) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Reparent all children of old_parent to new_parent (typically init, PID 1).
+/// Called when a process exits to prevent orphans.
+pub fn reparentChildren(old_parent: Pid, new_parent: Pid) void {
+    for (&process_table) |*maybe_proc| {
+        if (maybe_proc.*) |*proc| {
+            if (proc.parent_pid == old_parent) {
+                proc.parent_pid = new_parent;
+                console.log(.debug, "Process {}: reparented to {}", .{ proc.pid, new_parent });
+            }
+        }
+    }
+}

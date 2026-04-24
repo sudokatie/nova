@@ -3,8 +3,13 @@
 // First userspace process (PID 1).
 // Responsible for starting servers and the shell, and reaping orphans.
 
-const libnova = @import("../libnova/start.zig");
-const syscall = @import("../libnova/syscall.zig");
+const libnova = @import("libnova");
+const syscall = libnova.syscall;
+
+// Force _start to be included in the binary
+comptime {
+    _ = &libnova._start;
+}
 
 /// Child process info
 const ChildInfo = struct {
@@ -69,35 +74,21 @@ fn startServers() void {
 fn startShell() void {
     libnova.println("Starting shell...");
 
-    // Fork to create shell process
-    const child_pid = syscall.fork();
+    // Spawn the shell binary via syscall
+    // The path is null-terminated for the kernel's vfs.lookup
+    const shell_path = "/shell";
+    const child_pid = syscall.spawn(shell_path, null, null);
 
     if (child_pid < 0) {
-        libnova.println("ERROR: Failed to fork for shell");
+        libnova.println("ERROR: Failed to spawn shell");
         return;
     }
 
-    if (child_pid == 0) {
-        // Child process - this is the shell
-        // In a full implementation, we'd exec the shell binary
-        // For now, just run the shell code directly
-
-        libnova.println("Shell process started");
-        runShellLoop();
-        syscall.exit(0);
-    } else {
-        // Parent (init) - track the child
-        trackChild(child_pid, "shell");
-        libnova.print("Shell started with PID ");
-        printNumber(child_pid);
-        libnova.println("");
-    }
-}
-
-/// Run the shell loop (for embedded shell)
-fn runShellLoop() void {
-    const shell = @import("../shell/main.zig");
-    _ = shell.main();
+    // Track the child
+    trackChild(child_pid, "shell");
+    libnova.print("Shell started with PID ");
+    printNumber(child_pid);
+    libnova.println("");
 }
 
 /// Track a child process
@@ -143,22 +134,11 @@ fn mainLoop() void {
 
             untrackChild(exited_pid);
 
-            // If shell exited, restart it
-            var was_shell = false;
-            for (children) |maybe_child| {
-                if (maybe_child) |child| {
-                    _ = child;
-                    // Check if this was the shell
-                }
-            }
-
-            // Check if no children left
+            // If no children left, respawn shell
             if (child_count == 0) {
                 libnova.println("All children exited, respawning shell...");
                 startShell();
             }
-
-            _ = was_shell;
         } else {
             // No child to wait for, yield
             syscall.yield();

@@ -54,7 +54,7 @@ pub inline fn syscall0(number: u64) i64 {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (number),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -64,7 +64,7 @@ pub inline fn syscall1(number: u64, arg1: u64) i64 {
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (number),
           [a1] "{rdi}" (arg1),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -75,7 +75,7 @@ pub inline fn syscall2(number: u64, arg1: u64, arg2: u64) i64 {
         : [num] "{rax}" (number),
           [a1] "{rdi}" (arg1),
           [a2] "{rsi}" (arg2),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -87,7 +87,7 @@ pub inline fn syscall3(number: u64, arg1: u64, arg2: u64, arg3: u64) i64 {
           [a1] "{rdi}" (arg1),
           [a2] "{rsi}" (arg2),
           [a3] "{rdx}" (arg3),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -100,7 +100,7 @@ pub inline fn syscall4(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) 
           [a2] "{rsi}" (arg2),
           [a3] "{rdx}" (arg3),
           [a4] "{r10}" (arg4),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -114,7 +114,7 @@ pub inline fn syscall5(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, 
           [a3] "{rdx}" (arg3),
           [a4] "{r10}" (arg4),
           [a5] "{r8}" (arg5),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -129,7 +129,7 @@ pub inline fn syscall6(number: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, 
           [a4] "{r10}" (arg4),
           [a5] "{r8}" (arg5),
           [a6] "{r9}" (arg6),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -260,12 +260,12 @@ pub fn receive(src_tid: i32, buf: *Message) i32 {
 }
 
 /// Send and receive atomically
-pub fn call(dest_tid: i32, msg: *const Message, reply: *Message) i32 {
+pub fn call(dest_tid: i32, msg: *const Message, reply_buf: *Message) i32 {
     return @intCast(syscall3(
         SYS_CALL,
         @intCast(@as(u32, @bitCast(dest_tid))),
         @intFromPtr(msg),
-        @intFromPtr(reply),
+        @intFromPtr(reply_buf),
     ));
 }
 

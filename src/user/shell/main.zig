@@ -3,8 +3,13 @@
 // Basic command shell for Nova microkernel.
 // Handles command input and built-in commands.
 
-const libnova = @import("../libnova/start.zig");
-const syscall = @import("../libnova/syscall.zig");
+const libnova = @import("libnova");
+const syscall = libnova.syscall;
+
+// Force _start to be included in the binary
+comptime {
+    _ = &libnova._start;
+}
 
 // Input buffer
 const INPUT_BUFFER_SIZE: usize = 128;

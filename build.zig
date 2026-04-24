@@ -10,18 +10,95 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    // User program target (same arch but different code model)
+    const user_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+
+    // Create libnova module for user programs (includes syscall)
+    const libnova_module = b.createModule(.{
+        .root_source_file = b.path("src/user/libnova/start.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+
+    // Build init user program
+    const init_module = b.createModule(.{
+        .root_source_file = b.path("src/user/init/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    init_module.addImport("libnova", libnova_module);
+
+    const init_exe = b.addExecutable(.{
+        .name = "init",
+        .root_module = init_module,
+    });
+    init_exe.setLinkerScript(b.path("linker_user.ld"));
+
+    // Build shell user program
+    const shell_module = b.createModule(.{
+        .root_source_file = b.path("src/user/shell/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    shell_module.addImport("libnova", libnova_module);
+
+    const shell_exe = b.addExecutable(.{
+        .name = "shell",
+        .root_module = shell_module,
+    });
+    shell_exe.setLinkerScript(b.path("linker_user.ld"));
+
+    // Install user binaries (useful for debugging)
+    b.installArtifact(init_exe);
+    b.installArtifact(shell_exe);
+
+    // Create embedded binaries module that includes the user programs
+    const embedded_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/binaries_gen.zig"),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .kernel,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    // Embed init binary from build output
+    embedded_module.addAnonymousImport("init_elf", .{
+        .root_source_file = init_exe.getEmittedBin(),
+    });
+    // Embed shell binary from build output
+    embedded_module.addAnonymousImport("shell_elf", .{
+        .root_source_file = shell_exe.getEmittedBin(),
+    });
+
     // Kernel executable
+    const kernel_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .kernel,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    kernel_module.addImport("embedded", embedded_module);
+
     const kernel = b.addExecutable(.{
         .name = "nova",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/kernel/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .code_model = .kernel,
-            .red_zone = false,
-            .stack_check = false,
-            .stack_protector = false,
-        }),
+        .root_module = kernel_module,
     });
 
     // Add assembly stubs for operations that can't be done in Zig inline asm

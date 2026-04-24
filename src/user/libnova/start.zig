@@ -3,13 +3,13 @@
 // Minimal C runtime for Nova user programs.
 // Provides _start which calls main and exits.
 
-const syscall = @import("syscall.zig");
+pub const syscall = @import("syscall.zig");
 
 /// User program's main function (provided by the application)
 extern fn main() i32;
 
 /// Entry point - called by kernel when process starts
-export fn _start() noreturn {
+pub export fn _start() noreturn {
     // Call user's main function
     const exit_code = main();
 

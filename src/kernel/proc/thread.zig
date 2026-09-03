@@ -6,6 +6,7 @@ const pmm = @import("../mm/pmm.zig");
 const console = @import("../lib/console.zig");
 const Process = @import("process.zig").Process;
 const Pid = @import("process.zig").Pid;
+const port = @import("../ipc/port.zig");
 
 // Kernel stack size (8KB)
 pub const KERNEL_STACK_SIZE: u64 = 8192;
@@ -191,6 +192,7 @@ pub const Thread = struct {
     /// Terminate the thread
     pub fn terminate(self: *Thread) void {
         self.state = .terminated;
+        port.disconnectThread(self);
         self.process.removeThread(self);
     }
 };
@@ -257,6 +259,7 @@ pub fn get(tid: Tid) ?*Thread {
 
 /// Free a thread
 pub fn free(thread: *Thread) void {
+    port.disconnectThread(thread);
     thread.freeKernelStack();
     for (&thread_pool) |*slot| {
         if (slot.*) |*t| {

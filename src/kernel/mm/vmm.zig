@@ -155,6 +155,56 @@ pub const AddressSpace = struct {
         return pte.getPhysAddr() | @as(u64, indices.offset);
     }
 
+    /// Check that a user buffer is mapped for the requested access.
+    ///
+    /// The check covers every page touched by the range and rejects ranges
+    /// that cross the user/kernel boundary or wrap around the address space.
+    pub fn validateUserRange(self: *AddressSpace, virt_start: u64, size: u64, writable: bool) bool {
+        if (size == 0 or virt_start >= USER_MAX or size > USER_MAX - virt_start) {
+            return false;
+        }
+
+        const last_addr = virt_start + size - 1;
+        var page = virt_start & ~(PAGE_SIZE - 1);
+        const last_page = last_addr & ~(PAGE_SIZE - 1);
+
+        while (true) {
+            const entry = self.getPageEntry(page) orelse return false;
+            if (!entry.isUser() or (writable and !entry.isWritable())) {
+                return false;
+            }
+
+            if (page == last_page) break;
+            page += PAGE_SIZE;
+        }
+
+        return true;
+    }
+
+    /// Return the page-table entry covering a virtual address.
+    fn getPageEntry(self: *AddressSpace, virt_addr: u64) ?paging.Entry {
+        const indices = paging.getIndices(virt_addr);
+
+        const pml4: *paging.Table = @ptrFromInt(pmm.physToVirt(self.pml4_phys));
+        const pml4e = pml4.getEntry(indices.pml4).*;
+        if (!pml4e.isPresent() or !pml4e.isUser()) return null;
+
+        const pdpt: *paging.Table = @ptrFromInt(pmm.physToVirt(pml4e.getPhysAddr()));
+        const pdpte = pdpt.getEntry(indices.pdpt).*;
+        if (!pdpte.isPresent() or !pdpte.isUser()) return null;
+        if (pdpte.isHuge()) return pdpte;
+
+        const pd: *paging.Table = @ptrFromInt(pmm.physToVirt(pdpte.getPhysAddr()));
+        const pde = pd.getEntry(indices.pd).*;
+        if (!pde.isPresent() or !pde.isUser()) return null;
+        if (pde.isHuge()) return pde;
+
+        const pt: *paging.Table = @ptrFromInt(pmm.physToVirt(pde.getPhysAddr()));
+        const pte = pt.getEntry(indices.pt).*;
+        if (!pte.isPresent() or !pte.isUser()) return null;
+        return pte;
+    }
+
     /// Switch to this address space (load PML4 into CR3)
     pub fn activate(self: *AddressSpace) void {
         paging.setCr3(self.pml4_phys);

@@ -8,6 +8,7 @@ const ThreadState = @import("../proc/thread.zig").ThreadState;
 const scheduler = @import("../proc/scheduler.zig");
 const context = @import("../proc/context.zig");
 const console = @import("../lib/console.zig");
+const port = @import("port.zig");
 
 // Maximum inline message data
 pub const MAX_MSG_DATA: usize = 56;
@@ -41,9 +42,14 @@ pub const Message = struct {
         self.len = @intCast(copy_len);
     }
 
+    /// Return whether the length field stays within the inline data buffer.
+    pub fn isValid(self: *const Message) bool {
+        return self.len <= MAX_MSG_DATA;
+    }
+
     /// Get message data
     pub fn getData(self: *const Message) []const u8 {
-        return self.data[0..self.len];
+        return self.data[0..@min(self.len, MAX_MSG_DATA)];
     }
 };
 
@@ -84,6 +90,8 @@ fn getEndpoint(thread: *Thread) *Endpoint {
 
 /// Send a message to a thread (blocking)
 pub fn send(dest: *Thread, msg: *const Message) i32 {
+    if (!msg.isValid()) return -1;
+
     const current = context.getCurrent() orelse return -1;
     const src_ep = getEndpoint(current);
     const dst_ep = getEndpoint(dest);
@@ -180,8 +188,9 @@ pub fn receive(from: ?*Thread, msg: *Message) ?*Thread {
 /// Copy message data
 fn copyMessage(dst: *Message, src: *const Message) void {
     dst.tag = src.tag;
-    dst.len = src.len;
-    for (0..src.len) |i| {
+    const copy_len = @min(src.len, MAX_MSG_DATA);
+    dst.len = copy_len;
+    for (0..copy_len) |i| {
         dst.data[i] = src.data[i];
     }
 }
@@ -197,6 +206,8 @@ fn findThreadForEndpoint(ep: *Endpoint) ?*Thread {
 
 /// Non-blocking send (returns immediately if can't send)
 pub fn trySend(dest: *Thread, msg: *const Message) bool {
+    if (!msg.isValid()) return false;
+
     const dst_ep = getEndpoint(dest);
 
     if (dst_ep.state == .receiving) {
@@ -247,6 +258,7 @@ pub fn init() void {
     for (&shared_regions) |*r| {
         r.* = SharedRegion.init();
     }
+    port.init();
     console.log(.info, "IPC subsystem initialized", .{});
 }
 
@@ -571,11 +583,11 @@ pub fn destroySharedRegion(region: *SharedRegion) void {
 
 // ============= Port-Based Messaging (for IRQ forwarding) =============
 
-const port = @import("port.zig");
-
 /// Send a message to a port by ID (non-blocking, for IRQ handlers)
 /// Returns true if message was delivered or queued
 pub fn sendToPort(port_id: u32, msg: *const Message) bool {
+    if (!msg.isValid()) return false;
+
     const p = port.findById(port_id) orelse return false;
 
     // Queue the message (don't block - we're in an IRQ handler)

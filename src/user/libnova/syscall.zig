@@ -30,6 +30,11 @@ pub const SYS_SEND: u64 = 30;
 pub const SYS_RECEIVE: u64 = 31;
 pub const SYS_CALL: u64 = 32;
 pub const SYS_REPLY: u64 = 33;
+pub const SYS_PORT_CREATE: u64 = 34;
+pub const SYS_PORT_CONNECT: u64 = 35;
+pub const SYS_PORT_SEND: u64 = 36;
+pub const SYS_PORT_RECEIVE: u64 = 37;
+pub const SYS_PORT_DESTROY: u64 = 38;
 
 // Time
 pub const SYS_SLEEP: u64 = 40;
@@ -272,6 +277,42 @@ pub fn call(dest_tid: i32, msg: *const Message, reply_buf: *Message) i32 {
 /// Reply to caller
 pub fn reply(msg: *const Message) i32 {
     return @intCast(syscall1(SYS_REPLY, @intFromPtr(msg)));
+}
+
+/// Create a named port and return its kernel-assigned ID.
+pub fn port_create(name: []const u8) i32 {
+    return @intCast(syscall2(SYS_PORT_CREATE, @intFromPtr(name.ptr), name.len));
+}
+
+/// Connect to a named port and return its ID.
+pub fn port_connect(name: []const u8) i32 {
+    return @intCast(syscall2(SYS_PORT_CONNECT, @intFromPtr(name.ptr), name.len));
+}
+
+/// Send a message through a connected port.
+pub fn port_send(port_id: i32, msg: *const Message) i32 {
+    return @intCast(syscall2(
+        SYS_PORT_SEND,
+        @intCast(@as(u32, @bitCast(port_id))),
+        @intFromPtr(msg),
+    ));
+}
+
+/// Receive a message from a port. Returns 0 on delivery.
+pub fn port_receive(port_id: i32, buf: *Message) i32 {
+    return @intCast(syscall2(
+        SYS_PORT_RECEIVE,
+        @intCast(@as(u32, @bitCast(port_id))),
+        @intFromPtr(buf),
+    ));
+}
+
+/// Destroy a port created by the calling process.
+pub fn port_destroy(port_id: i32) i32 {
+    return @intCast(syscall1(
+        SYS_PORT_DESTROY,
+        @intCast(@as(u32, @bitCast(port_id))),
+    ));
 }
 
 // ============= Time Syscalls =============

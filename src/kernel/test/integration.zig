@@ -13,6 +13,7 @@ const scheduler = @import("../proc/scheduler.zig");
 const context = @import("../proc/context.zig");
 const syscall = @import("../arch/x86_64/syscall.zig");
 const ipc = @import("../ipc/message.zig");
+const port = @import("../ipc/port.zig");
 const elf = @import("../loader/elf.zig");
 const vfs = @import("../fs/vfs.zig");
 const ramfs = @import("../fs/ramfs.zig");
@@ -34,6 +35,7 @@ pub fn runAll() void {
     testThread();
     testSyscall();
     testIpc();
+    testPortIpc();
     testElfParser();
     testVfs();
     testStress();
@@ -368,6 +370,65 @@ fn testIpc() void {
         thread_mod.free(t);
     } else {
         fail("notification signal/poll");
+    }
+}
+
+fn testPortIpc() void {
+    console.println("[Port IPC Tests]", .{});
+
+    var owner = process.Process.init(200, null);
+    var server = thread_mod.Thread.init(200, &owner);
+    var client_process = process.Process.init(201, null);
+    var client = thread_mod.Thread.init(201, &client_process);
+
+    const endpoint = port.create("driver-ipc", &owner, &server) orelse {
+        fail("port creation");
+        return;
+    };
+    defer {
+        context.setCurrent(null);
+        port.destroy(endpoint);
+    }
+
+    if (port.connect(endpoint, &client) == null) {
+        fail("port connection");
+        return;
+    }
+
+    var request = ipc.Message.init(0x100);
+    request.setData("driver request");
+    context.setCurrent(&client);
+    if (port.send(endpoint, &request) != 0) {
+        fail("port client send");
+        return;
+    }
+
+    var received = ipc.Message.init(0);
+    context.setCurrent(&server);
+    const request_result = port.receiveResult(endpoint, &received);
+    if (request_result.delivered and request_result.sender == &client and
+        request_result.sender.?.tid == client.tid and received.tag == request.tag and
+        received.getData().len == request.getData().len)
+    {
+        pass("port client/server message delivery");
+    } else {
+        fail("port client/server message delivery");
+    }
+
+    var irq = ipc.Message.init(0x49525100);
+    irq.setData(&[_]u8{1});
+    if (!ipc.sendToPort(endpoint.id, &irq)) {
+        fail("port IRQ notification queue");
+        return;
+    }
+
+    const irq_result = port.receiveResult(endpoint, &received);
+    if (irq_result.delivered and irq_result.sender == null and received.tag == irq.tag and
+        received.getData().len == irq.getData().len)
+    {
+        pass("port IRQ notification delivery");
+    } else {
+        fail("port IRQ notification delivery");
     }
 }
 

@@ -7,6 +7,7 @@ const pmm = @import("../mm/pmm.zig");
 const console = @import("../lib/console.zig");
 const Thread = @import("thread.zig").Thread;
 const capability = @import("../ipc/capability.zig");
+const port = @import("../ipc/port.zig");
 
 // Maximum number of processes
 pub const MAX_PROCESSES: usize = 256;
@@ -106,6 +107,8 @@ pub const Process = struct {
     /// Terminate the process
     pub fn terminate(self: *Process, exit_code: i32) void {
         self.exit_code = exit_code;
+        port.destroyOwnedBy(self);
+        port.disconnectProcess(self);
         capability.releaseAll(self);
         self.state = .zombie;
         // TODO: Notify parent, cleanup threads
@@ -189,6 +192,8 @@ pub fn free(pid: Pid) void {
     if (pid >= MAX_PROCESSES) return;
 
     if (process_table[pid]) |*proc| {
+        port.destroyOwnedBy(proc);
+        port.disconnectProcess(proc);
         capability.releaseAll(proc);
         // TODO: Free address space, cleanup threads
         process_table[pid] = null;

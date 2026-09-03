@@ -61,9 +61,36 @@ pub fn build(b: *std.Build) void {
     });
     shell_exe.setLinkerScript(b.path("linker_user.ld"));
 
+    // Build the userspace keyboard driver so its port-based IPC contract is
+    // checked together with the kernel and other userspace programs.
+    const keyboard_driver_module = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/keyboard/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    const user_syscall_module = b.createModule(.{
+        .root_source_file = b.path("src/user/libnova/syscall.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    keyboard_driver_module.addImport("syscall", user_syscall_module);
+
+    const keyboard_driver_exe = b.addExecutable(.{
+        .name = "keyboard_driver",
+        .root_module = keyboard_driver_module,
+    });
+    keyboard_driver_exe.setLinkerScript(b.path("linker_user.ld"));
+
     // Install user binaries (useful for debugging)
     b.installArtifact(init_exe);
     b.installArtifact(shell_exe);
+    b.installArtifact(keyboard_driver_exe);
 
     // Create embedded binaries module that includes the user programs
     const embedded_module = b.createModule(.{

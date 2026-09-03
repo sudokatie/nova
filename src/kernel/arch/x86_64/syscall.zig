@@ -16,6 +16,7 @@ const vmm = @import("../../mm/vmm.zig");
 const pmm = @import("../../mm/pmm.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const message = @import("../../ipc/message.zig");
+const ipc_port = @import("../../ipc/port.zig");
 const capability = @import("../../ipc/capability.zig");
 const elf = @import("../../loader/elf.zig");
 const timer = @import("../../drivers/timer.zig");
@@ -74,6 +75,11 @@ pub const SYS_SEND: usize = 30;
 pub const SYS_RECEIVE: usize = 31;
 pub const SYS_CALL: usize = 32;
 pub const SYS_REPLY: usize = 33;
+pub const SYS_PORT_CREATE: usize = 34;
+pub const SYS_PORT_CONNECT: usize = 35;
+pub const SYS_PORT_SEND: usize = 36;
+pub const SYS_PORT_RECEIVE: usize = 37;
+pub const SYS_PORT_DESTROY: usize = 38;
 
 // Time
 pub const SYS_SLEEP: usize = 40;
@@ -301,6 +307,11 @@ fn registerDefaults() void {
     register(SYS_RECEIVE, &sysReceive);
     register(SYS_CALL, &sysCall);
     register(SYS_REPLY, &sysReply);
+    register(SYS_PORT_CREATE, &sysPortCreate);
+    register(SYS_PORT_CONNECT, &sysPortConnect);
+    register(SYS_PORT_SEND, &sysPortSend);
+    register(SYS_PORT_RECEIVE, &sysPortReceive);
+    register(SYS_PORT_DESTROY, &sysPortDestroy);
 
     // Time
     register(SYS_SLEEP, &sysSleep);
@@ -353,7 +364,65 @@ pub fn setCurrentThread(thread: ?*Thread) void {
 }
 
 pub fn getCurrentThread() ?*Thread {
-    return per_cpu.current_thread;
+    return currentThread();
+}
+
+/// Return the current thread used by syscall handlers.
+///
+/// The context module is the scheduler's source of truth. The per-CPU copy is
+/// retained as a fallback for entry paths that set it explicitly.
+fn currentThread() ?*Thread {
+    return context.getCurrent() orelse per_cpu.current_thread;
+}
+
+/// Check and copy a userspace byte range into kernel memory.
+fn userRangeIsValid(thread: *Thread, ptr: u64, len: usize, writable: bool) bool {
+    if (len == 0) return false;
+    if (thread.process.address_space) |*space| {
+        return space.validateUserRange(ptr, @intCast(len), writable);
+    }
+    return false;
+}
+
+fn copyFromUser(thread: *Thread, ptr: u64, dst: []u8) bool {
+    if (!userRangeIsValid(thread, ptr, dst.len, false)) return false;
+
+    const src: [*]const u8 = @ptrFromInt(ptr);
+    @memcpy(dst, src[0..dst.len]);
+    return true;
+}
+
+/// Check and copy a kernel byte range into userspace memory.
+fn copyToUser(thread: *Thread, ptr: u64, src: []const u8) bool {
+    if (!userRangeIsValid(thread, ptr, src.len, true)) return false;
+
+    const dst: [*]u8 = @ptrFromInt(ptr);
+    @memcpy(dst[0..src.len], src);
+    return true;
+}
+
+/// Copy and validate an IPC message supplied by userspace.
+fn copyMessageFromUser(thread: *Thread, ptr: u64) ?message.Message {
+    var result = message.Message.init(0);
+    const bytes: []u8 = @as([*]u8, @ptrCast(&result))[0..@sizeOf(message.Message)];
+    if (!copyFromUser(thread, ptr, bytes) or !result.isValid()) return null;
+    return result;
+}
+
+/// Copy an IPC message into a validated userspace buffer.
+fn copyMessageToUser(thread: *Thread, ptr: u64, msg: *const message.Message) bool {
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(msg))[0..@sizeOf(message.Message)];
+    return copyToUser(thread, ptr, bytes);
+}
+
+/// Copy a validated port name supplied by userspace.
+fn copyPortName(thread: *Thread, ptr: u64, len: u64, buffer: *[ipc_port.MAX_PORT_NAME - 1]u8) ?[]const u8 {
+    if (len == 0 or len >= ipc_port.MAX_PORT_NAME) return null;
+
+    const name_len: usize = @intCast(len);
+    if (!copyFromUser(thread, ptr, buffer[0..name_len])) return null;
+    if (!ipc_port.isValidName(buffer[0..name_len])) return null;
+    return buffer[0..name_len];
 }
 
 // ============= Memory Syscalls =============
@@ -750,6 +819,76 @@ fn sysReply(msg_ptr: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     return message.send(caller, msg);
 }
 
+// ============= Port IPC Syscalls =============
+
+/// Create a named port owned by the calling process.
+/// Args: name pointer, name length.
+/// Returns: port ID, or -1 on error.
+fn sysPortCreate(name_ptr: u64, name_len: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = currentThread() orelse return -1;
+    var name_buffer: [ipc_port.MAX_PORT_NAME - 1]u8 = undefined;
+    const name = copyPortName(thread, name_ptr, name_len, &name_buffer) orelse return -1;
+    const endpoint = ipc_port.create(name, thread.process, thread) orelse return -1;
+    return @intCast(endpoint.id);
+}
+
+/// Connect the calling thread to a named port.
+/// Args: name pointer, name length.
+/// Returns: port ID, or -1 on error.
+fn sysPortConnect(name_ptr: u64, name_len: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    const thread = currentThread() orelse return -1;
+    var name_buffer: [ipc_port.MAX_PORT_NAME - 1]u8 = undefined;
+    const name = copyPortName(thread, name_ptr, name_len, &name_buffer) orelse return -1;
+    const endpoint = ipc_port.findByName(name) orelse return -1;
+    _ = ipc_port.connect(endpoint, thread) orelse return -1;
+    return @intCast(endpoint.id);
+}
+
+/// Send a message to a connected port.
+/// Args: port ID, userspace message pointer.
+fn sysPortSend(port_id: u64, msg_ptr: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port_id >= ipc_port.MAX_PORTS) return -1;
+
+    const thread = currentThread() orelse return -1;
+    const endpoint = ipc_port.findById(@intCast(port_id)) orelse return -1;
+    const outgoing = copyMessageFromUser(thread, msg_ptr) orelse return -1;
+    return ipc_port.send(endpoint, &outgoing);
+}
+
+/// Receive a message from a port into a userspace buffer.
+/// Args: port ID, userspace message pointer.
+fn sysPortReceive(port_id: u64, msg_ptr: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port_id >= ipc_port.MAX_PORTS) return -1;
+
+    const thread = currentThread() orelse return -1;
+    if (!userRangeIsValid(thread, msg_ptr, @sizeOf(message.Message), true)) return -1;
+
+    const endpoint = ipc_port.findById(@intCast(port_id)) orelse return -1;
+    var incoming = message.Message.init(0);
+    const result = ipc_port.receiveResult(endpoint, &incoming);
+    if (!result.delivered or !copyMessageToUser(thread, msg_ptr, &incoming)) return -1;
+    return 0;
+}
+
+/// Destroy a port owned by the calling process.
+/// Args: port ID.
+fn sysPortDestroy(port_id: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port_id >= ipc_port.MAX_PORTS) return -1;
+
+    const thread = currentThread() orelse return -1;
+    const endpoint = ipc_port.findById(@intCast(port_id)) orelse return -1;
+    if (endpoint.owner != thread.process) return -1;
+
+    for (thread.process.capabilities.irqs[0..thread.process.capabilities.irq_count]) |maybe_irq| {
+        if (maybe_irq) |irq_cap| {
+            if (irq_cap.notify_port == endpoint.id) return -1;
+        }
+    }
+
+    ipc_port.destroy(endpoint);
+    return 0;
+}
+
 // ============= Time Syscalls =============
 
 fn sysSleep(nanoseconds: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
@@ -805,7 +944,7 @@ fn sysReadChar(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysRequestIoport(base: u64, count: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (base > 0xFFFF or count > 0xFFFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const port: u16 = @truncate(base);
@@ -829,7 +968,7 @@ fn sysRequestIoport(base: u64, count: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysReleaseIoport(base: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (base > 0xFFFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const port: u16 = @truncate(base);
@@ -846,11 +985,14 @@ fn sysReleaseIoport(base: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (irq > 0xFF or notify_port > 0xFFFF_FFFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const irq_num: u8 = @truncate(irq);
-    const port: u32 = @truncate(notify_port);
+    const notify_port_id: u32 = @truncate(notify_port);
+
+    const notify_endpoint = ipc_port.findById(notify_port_id) orelse return -1;
+    if (notify_endpoint.owner != process or notify_endpoint.server_thread == null) return -1;
 
     // Claim IRQ globally
     capability.claimIrq(irq_num, process) catch {
@@ -858,7 +1000,7 @@ fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64
     };
 
     // Grant to process
-    process.capabilities.grantIrq(irq_num, port) catch {
+    process.capabilities.grantIrq(irq_num, notify_port_id) catch {
         capability.releaseIrq(irq_num, process);
         return -1;
     };
@@ -870,7 +1012,7 @@ fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64
 fn sysReleaseIrq(irq: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (irq > 0xFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const irq_num: u8 = @truncate(irq);
@@ -886,7 +1028,7 @@ fn sysReleaseIrq(irq: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysInb(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (port > 0xFFFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const p: u16 = @truncate(port);
@@ -905,7 +1047,7 @@ fn sysInb(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysOutb(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (port > 0xFFFF or value > 0xFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const p: u16 = @truncate(port);
@@ -922,7 +1064,7 @@ fn sysOutb(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysInw(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (port > 0xFFFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const p: u16 = @truncate(port);
@@ -939,7 +1081,7 @@ fn sysInw(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 fn sysOutw(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
     if (port > 0xFFFF or value > 0xFFFF) return -1;
 
-    const thread = per_cpu.current_thread orelse return -1;
+    const thread = currentThread() orelse return -1;
     const process = thread.process;
 
     const p: u16 = @truncate(port);
@@ -967,6 +1109,33 @@ test "device syscalls reject values that would truncate" {
     try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_INW, 0x1_0000, 0, 0, 0, 0, 0));
     try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_OUTW, 0x1_0000, 0, 0, 0, 0, 0));
     try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_OUTW, 0, 0x1_0000, 0, 0, 0, 0));
+}
+
+test "port syscalls enforce ownership and IRQ targets" {
+    registerDefaults();
+    ipc_port.init();
+
+    var owner = Process.init(130, null);
+    var server = Thread.init(130, &owner);
+    var other_process = Process.init(131, null);
+    var other = Thread.init(131, &other_process);
+
+    const endpoint = ipc_port.create("syscall-port", &owner, &server) orelse return error.PortCreationFailed;
+    defer {
+        context.setCurrent(null);
+        if (ipc_port.findById(endpoint.id)) |active| ipc_port.destroy(active);
+    }
+
+    context.setCurrent(&other);
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_PORT_DESTROY, endpoint.id, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_REQUEST_IRQ, 5, endpoint.id, 0, 0, 0, 0));
+
+    context.setCurrent(&server);
+    try std.testing.expectEqual(@as(i64, 0), syscallDispatch(SYS_REQUEST_IRQ, 5, endpoint.id, 0, 0, 0, 0));
+    try std.testing.expect(owner.capabilities.ownsIrq(5));
+    try std.testing.expectEqual(@as(i64, 0), syscallDispatch(SYS_RELEASE_IRQ, 5, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, 0), syscallDispatch(SYS_PORT_DESTROY, endpoint.id, 0, 0, 0, 0, 0));
+    try std.testing.expect(ipc_port.findById(endpoint.id) == null);
 }
 
 /// Test syscall dispatch (kernel-mode test)

@@ -7,7 +7,7 @@
 // - Receives IRQ notifications via IPC
 // - Translates scancodes to key events
 
-const syscall = @import("../../libnova/syscall.zig");
+const syscall = @import("syscall");
 
 // PS/2 keyboard I/O ports
 const DATA_PORT: u16 = 0x60;
@@ -64,18 +64,18 @@ const MSG_TAG_KEY_EVENT: u32 = 0x4B455900; // "KEY\0"
 
 // Simple scancode to ASCII mapping (US layout, lowercase only)
 const scancode_to_ascii = [_]u8{
-    0,    0,    '1', '2', '3', '4', '5', '6', // 0x00-0x07
-    '7',  '8',  '9', '0', '-', '=', 0,   0,   // 0x08-0x0F (0x0E=backspace, 0x0F=tab)
-    'q',  'w',  'e', 'r', 't', 'y', 'u', 'i', // 0x10-0x17
-    'o',  'p',  '[', ']', 0,   0,   'a', 's', // 0x18-0x1F (0x1C=enter, 0x1D=lctrl)
-    'd',  'f',  'g', 'h', 'j', 'k', 'l', ';', // 0x20-0x27
-    '\'', '`',  0,   '\\','z', 'x', 'c', 'v', // 0x28-0x2F (0x2A=lshift)
-    'b',  'n',  'm', ',', '.', '/', 0,   '*', // 0x30-0x37 (0x36=rshift)
-    0,    ' ',  0,   0,   0,   0,   0,   0,   // 0x38-0x3F (0x38=lalt, 0x3A=caps)
-    0,    0,    0,   0,   0,   0,   0,   0,   // 0x40-0x47
-    0,    0,    0,   0,   0,   0,   0,   0,   // 0x48-0x4F
-    0,    0,    0,   0,   0,   0,   0,   0,   // 0x50-0x57
-    0,    0,    0,   0,   0,   0,   0,   0,   // 0x58-0x5F
+    0, 0, '1', '2', '3', '4', '5', '6', // 0x00-0x07
+    '7', '8', '9', '0', '-', '=', 0, 0, // 0x08-0x0F (0x0E=backspace, 0x0F=tab)
+    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', // 0x10-0x17
+    'o', 'p', '[', ']', 0, 0, 'a', 's', // 0x18-0x1F (0x1C=enter, 0x1D=lctrl)
+    'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', // 0x20-0x27
+    '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', // 0x28-0x2F (0x2A=lshift)
+    'b', 'n', 'm', ',', '.', '/', 0, '*', // 0x30-0x37 (0x36=rshift)
+    0, ' ', 0, 0, 0, 0, 0, 0, // 0x38-0x3F (0x38=lalt, 0x3A=caps)
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x40-0x47
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x48-0x4F
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x50-0x57
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x58-0x5F
 };
 
 // Special key scancodes
@@ -91,30 +91,38 @@ const SC_RELEASE: u8 = 0x80; // OR'd with scancode for release
 fn init() !void {
     // Request I/O port access
     if (syscall.request_ioport(DATA_PORT, 1) < 0) {
-        syscall.debug_print("kbd: failed to request data port\n");
+        _ = syscall.debug_print("kbd: failed to request data port\n");
         return error.PortRequestFailed;
     }
 
     if (syscall.request_ioport(STATUS_PORT, 1) < 0) {
-        syscall.debug_print("kbd: failed to request status port\n");
+        _ = syscall.debug_print("kbd: failed to request status port\n");
         return error.PortRequestFailed;
     }
 
-    // Create a port for receiving IRQ notifications
-    // In a real implementation, we'd use port_create syscall
-    // For now, use a fixed port ID that the kernel knows about
-    irq_notify_port = 100; // Fixed port for keyboard driver
+    // Create a private port for receiving IRQ notifications.
+    const irq_port = syscall.port_create("kbd-irq");
+    if (irq_port < 0) {
+        _ = syscall.debug_print("kbd: failed to create IRQ port\n");
+        return error.PortRequestFailed;
+    }
+    irq_notify_port = @intCast(irq_port);
 
     // Request IRQ 1 with our notification port
     if (syscall.request_irq(KEYBOARD_IRQ, irq_notify_port) < 0) {
-        syscall.debug_print("kbd: failed to request IRQ\n");
+        _ = syscall.debug_print("kbd: failed to request IRQ\n");
         return error.IrqRequestFailed;
     }
 
-    // Create server port for clients to receive key events
-    server_port = 101; // Fixed port for key events
+    // Create the named server endpoint for future key-event clients.
+    const event_port = syscall.port_create("kbd0");
+    if (event_port < 0) {
+        _ = syscall.debug_print("kbd: failed to create event port\n");
+        return error.PortRequestFailed;
+    }
+    server_port = @intCast(event_port);
 
-    syscall.debug_print("kbd: userspace keyboard driver initialized\n");
+    _ = syscall.debug_print("kbd: userspace keyboard driver initialized\n");
 }
 
 /// Read a byte from the keyboard data port
@@ -231,23 +239,19 @@ fn driverLoop() void {
     var msg: syscall.Message = undefined;
 
     while (true) {
-        // Wait for IRQ notification
-        const sender = syscall.receive(-1, &msg); // -1 = any sender
-        _ = sender;
-
-        if (msg.tag == MSG_TAG_IRQ) {
+        // Wait for an IRQ notification on the port created during startup.
+        if (syscall.port_receive(@intCast(irq_notify_port), &msg) == 0 and msg.tag == MSG_TAG_IRQ) {
             handleIrq();
         }
     }
 }
 
 /// Driver entry point
-pub fn main() void {
-    syscall.debug_print("kbd: starting userspace keyboard driver\n");
+export fn main() void {
+    _ = syscall.debug_print("kbd: starting userspace keyboard driver\n");
 
-    init() catch |err| {
-        _ = err;
-        syscall.debug_print("kbd: initialization failed\n");
+    init() catch {
+        _ = syscall.debug_print("kbd: initialization failed\n");
         syscall.exit(1);
     };
 
@@ -263,9 +267,5 @@ pub export fn _start() callconv(.Naked) noreturn {
         \\mov $13, %%rax
         \\xor %%rdi, %%rdi
         \\syscall
-        :
-        :
-        : "rax", "rdi"
-    );
-    unreachable;
+        ::: "rax", "rdi");
 }

@@ -3,6 +3,7 @@
 // SYSCALL/SYSRET setup and dispatch for x86_64.
 // Uses the fast syscall mechanism via MSRs.
 
+const std = @import("std");
 const cpu = @import("cpu.zig");
 const gdt = @import("gdt.zig");
 const console = @import("../../lib/console.zig");
@@ -165,7 +166,7 @@ pub fn init() void {
     // Then hardware ORs RPL 3: CS = 0x18|3 = 0x1B, SS = 0x10|3 = 0x13
     // But our user SS is at 0x20! So STAR[63:48] should be 0x18
     // CS = 0x18 + 16 = 0x28 | 3 = 0x2B... that's wrong too
-    // 
+    //
     // Actually, I had the GDT order wrong. Standard order is:
     // 0x00: null, 0x08: kernel code, 0x10: kernel data, 0x18: user data, 0x20: user code
     // Wait no, typically it's: null, kcode, kdata, ucode, udata
@@ -174,33 +175,33 @@ pub fn init() void {
     // We want ucode=0x18|3=0x1B, udata=0x20|3=0x23
     // STAR[63:48] + 16 = 0x18 => STAR[63:48] = 0x08
     // STAR[63:48] + 8 = 0x10 (kernel data, but we want user data 0x20!)
-    // 
+    //
     // The issue is the GDT layout. For SYSRET to work, user CS must be user DS - 8.
     // So if udata=0x20, ucode should be 0x20-8=0x18? No, SYSRET adds to get CS, adds less to get SS
     // CS = base + 16, SS = base + 8
     // If base = 0x10: CS = 0x26|3, SS = 0x18|3
     // If base = 0x08: CS = 0x18|3, SS = 0x10|3
-    // 
+    //
     // I need to reorder GDT: null, kcode, kdata, udata, ucode (so ucode = udata + 8)
     // Then base = 0x10: SS = 0x18 (udata), CS = 0x26... still wrong
-    // 
+    //
     // Actually reading Intel manual more carefully:
     // SYSRET loads CS from IA32_STAR[63:48]+16, SS from IA32_STAR[63:48]+8
     // So if I want CS=0x18, SS=0x20, then 0x18 = base+16, 0x20 = base+8
     // base = 0x08, 0x08+16=0x18 OK, 0x08+8=0x10 != 0x20 WRONG
-    // 
+    //
     // The only way this works is if user SS is at user CS - 8
     // So GDT must be: null, kcode, kdata, ucode, udata where udata = ucode + 8
     // But standard is ucode before udata...
-    // 
+    //
     // Many OSes swap the order: null, kcode, kdata, udata, ucode
     // Then ucode = 0x20, udata = 0x18
     // SYSRET with base=0x10: CS = 0x10+16 = 0x26|3, SS = 0x10+8 = 0x18|3
     // Still doesn't work... because CS should be 0x20
-    // 
+    //
     // Let me try: GDT = null(0x00), kcode(0x08), kdata(0x10), udata(0x18), ucode(0x20)
     // SYSRET base = 0x10: CS = 0x26... still off
-    // 
+    //
     // OK I think I finally understand. The selectors themselves are:
     // STAR[63:48] is used as a BASE, not a selector.
     // Resulting CS = BASE + 16, SS = BASE + 8
@@ -209,11 +210,11 @@ pub fn init() void {
     //   SS selector = 0x08 + 8 = 0x10, then OR with 3 = 0x13
     // This means user CS must be at index 3 (0x18), user SS at index 2 (0x10)
     // But index 2 is kernel data!
-    // 
+    //
     // The solution is to have GDT: null, kcode, kdata, ucode (32-bit compat), udata, ucode64
     // Or simpler: null, kcode, kdata, userdata32, usercode64
     // Then STAR[63:48] = (user32 - 8) so that +16 and +8 land on correct entries
-    // 
+    //
     // Simplest working layout for SYSRET 64-bit:
     // 0x00: null
     // 0x08: kernel code 64
@@ -221,7 +222,7 @@ pub fn init() void {
     // 0x18: user data (SS for SYSRET = base+8 where base=0x10, 0x10+8=0x18)
     // 0x20: user code 64 (CS for SYSRET = base+16, 0x10+16=0x20)
     // So STAR[63:48] = 0x10, giving SS=0x18|3=0x1B, CS=0x20|3=0x23
-    // 
+    //
     // Let me update to this layout.
 
     // With corrected GDT layout:
@@ -229,13 +230,13 @@ pub fn init() void {
     // 0x18 = user data, 0x20 = user code
     // For SYSCALL: CS = STAR[47:32], SS = STAR[47:32] + 8
     // For SYSRET 64: CS = STAR[63:48] + 16 | 3, SS = STAR[63:48] + 8 | 3
-    // 
+    //
     // SYSCALL: we want CS=0x08, SS=0x10
     //   STAR[47:32] = 0x08, SS = 0x08 + 8 = 0x10 ✓
     // SYSRET: we want CS=0x23 (0x20|3), SS=0x1B (0x18|3)
     //   STAR[63:48] + 16 = 0x20 => STAR[63:48] = 0x10
     //   STAR[63:48] + 8 = 0x18 ✓
-    // 
+    //
     // So STAR = (0x10 << 48) | (0x08 << 32) but the shifts are different in how OS does it
     // Actually: STAR[31:0] = reserved, [47:32] = SYSCALL CS, [63:48] = SYSRET CS base
     // Value: ((SYSRET_BASE) << 48) | ((SYSCALL_CS) << 32)
@@ -802,6 +803,8 @@ fn sysReadChar(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 /// Args: base_port, count
 /// Returns: 0 on success, -1 on error
 fn sysRequestIoport(base: u64, count: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (base > 0xFFFF or count > 0xFFFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -824,6 +827,8 @@ fn sysRequestIoport(base: u64, count: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
 /// Release I/O port access
 fn sysReleaseIoport(base: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (base > 0xFFFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -839,6 +844,8 @@ fn sysReleaseIoport(base: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 /// Request an IRQ
 /// Args: irq_number, notification_port
 fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (irq > 0xFF or notify_port > 0xFFFF_FFFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -861,6 +868,8 @@ fn sysRequestIrq(irq: u64, notify_port: u64, _: u64, _: u64, _: u64, _: u64) i64
 
 /// Release an IRQ
 fn sysReleaseIrq(irq: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (irq > 0xFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -875,6 +884,8 @@ fn sysReleaseIrq(irq: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
 /// Read a byte from an I/O port (with capability check)
 fn sysInb(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port > 0xFFFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -892,6 +903,8 @@ fn sysInb(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
 /// Write a byte to an I/O port (with capability check)
 fn sysOutb(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port > 0xFFFF or value > 0xFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -907,6 +920,8 @@ fn sysOutb(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
 /// Read a word from an I/O port
 fn sysInw(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port > 0xFFFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -922,6 +937,8 @@ fn sysInw(port: u64, _: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
 /// Write a word to an I/O port
 fn sysOutw(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
+    if (port > 0xFFFF or value > 0xFFFF) return -1;
+
     const thread = per_cpu.current_thread orelse return -1;
     const process = thread.process;
 
@@ -933,6 +950,23 @@ fn sysOutw(port: u64, value: u64, _: u64, _: u64, _: u64, _: u64) i64 {
 
     cpu.outw(p, @truncate(value));
     return 0;
+}
+
+test "device syscalls reject values that would truncate" {
+    registerDefaults();
+
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_REQUEST_IOPORT, 0x1_0000, 1, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_REQUEST_IOPORT, 0, 0x1_0000, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_RELEASE_IOPORT, 0x1_0000, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_REQUEST_IRQ, 0x100, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_REQUEST_IRQ, 1, 0x1_0000_0000, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_RELEASE_IRQ, 0x100, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_INB, 0x1_0000, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_OUTB, 0x1_0000, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_OUTB, 0, 0x100, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_INW, 0x1_0000, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_OUTW, 0x1_0000, 0, 0, 0, 0, 0));
+    try std.testing.expectEqual(@as(i64, -1), syscallDispatch(SYS_OUTW, 0, 0x1_0000, 0, 0, 0, 0));
 }
 
 /// Test syscall dispatch (kernel-mode test)

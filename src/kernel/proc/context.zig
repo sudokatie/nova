@@ -213,7 +213,8 @@ fn loadContext(new_rsp: u64) void {
         \\iretq
         :
         : [new_rsp] "r" (new_rsp),
-        : .{ .memory = true });
+        : "memory"
+    );
 }
 
 /// Switch from kernel to user mode (used when starting a userspace thread)
@@ -251,7 +252,8 @@ pub fn switchToUser(entry: u64, user_stack: u64, arg: u64) noreturn {
         : [entry] "r" (entry),
           [user_stack] "r" (user_stack),
           [arg] "r" (arg),
-        : .{ .memory = true });
+        : "memory"
+    );
     unreachable;
 }
 

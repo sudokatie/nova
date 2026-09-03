@@ -3,6 +3,8 @@
 // Provides early debug output via the serial port.
 // COM1 is at I/O port 0x3F8.
 
+const builtin = @import("builtin");
+
 const COM1: u16 = 0x3F8;
 
 // Port offsets
@@ -55,6 +57,8 @@ pub fn init() void {
 
 /// Write a single byte to serial
 pub fn writeByte(byte: u8) void {
+    if (builtin.is_test) return;
+
     // Wait for transmit buffer to be empty
     while ((inb(COM1 + LSR) & LSR_THRE) == 0) {}
     outb(COM1 + DATA, byte);

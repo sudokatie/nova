@@ -149,13 +149,17 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests (run on host)
     const host_target = b.standardTargetOptions(.{});
-    const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/kernel/main.zig"),
-            .target = host_target,
-            .optimize = optimize,
-        }),
+    const unit_test_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/main.zig"),
+        .target = host_target,
+        .optimize = optimize,
     });
+    unit_test_module.addImport("embedded", embedded_module);
+
+    const unit_tests = b.addTest(.{
+        .root_module = unit_test_module,
+    });
+    unit_tests.addAssemblyFile(b.path("src/kernel/arch/x86_64/asm_stubs.s"));
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");

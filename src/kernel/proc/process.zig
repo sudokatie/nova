@@ -106,6 +106,7 @@ pub const Process = struct {
     /// Terminate the process
     pub fn terminate(self: *Process, exit_code: i32) void {
         self.exit_code = exit_code;
+        capability.releaseAll(self);
         self.state = .zombie;
         // TODO: Notify parent, cleanup threads
     }
@@ -188,8 +189,8 @@ pub fn free(pid: Pid) void {
     if (pid >= MAX_PROCESSES) return;
 
     if (process_table[pid]) |*proc| {
+        capability.releaseAll(proc);
         // TODO: Free address space, cleanup threads
-        _ = proc;
         process_table[pid] = null;
         console.log(.debug, "Process {}: Freed", .{pid});
     }

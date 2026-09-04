@@ -15,7 +15,7 @@ Nova is a learning project. It's not trying to replace Linux. It's trying to dem
 - Preemptive multitasking scheduler
 - L4-style synchronous IPC with capability-based access control
 - Runs userspace programs
-- Userspace drivers (keyboard via IPC)
+- Userspace drivers (keyboard and timer via IPC)
 - Virtual filesystem server with ramfs
 
 Everything else (filesystems, networking, drivers) runs in userspace servers. Microkernel philosophy: the kernel should be as small as possible while still being useful.
@@ -72,6 +72,7 @@ v0.1.0 complete. All core subsystems implemented:
 - [x] ELF64 loader
 - [x] Userspace runtime (libnova)
 - [x] Init process and shell
+- [x] Userspace timer driver example (IRQ 0 via capability-owned IPC)
 
 ## Philosophy
 

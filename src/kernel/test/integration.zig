@@ -17,6 +17,8 @@ const port = @import("../ipc/port.zig");
 const elf = @import("../loader/elf.zig");
 const vfs = @import("../fs/vfs.zig");
 const ramfs = @import("../fs/ramfs.zig");
+const capability = @import("../ipc/capability.zig");
+const idt = @import("../arch/x86_64/idt.zig");
 
 const serial = @import("../drivers/serial.zig");
 
@@ -36,6 +38,7 @@ pub fn runAll() void {
     testSyscall();
     testIpc();
     testPortIpc();
+    testUserspaceTimerDriver();
     testElfParser();
     testVfs();
     testStress();
@@ -429,6 +432,97 @@ fn testPortIpc() void {
         pass("port IRQ notification delivery");
     } else {
         fail("port IRQ notification delivery");
+    }
+}
+
+fn testUserspaceTimerDriver() void {
+    console.println("[Userspace Timer Driver Tests]", .{});
+
+    var driver_process = process.Process.init(210, null);
+    var driver_thread = thread_mod.Thread.init(210, &driver_process);
+    var client_process = process.Process.init(211, null);
+    var client_thread = thread_mod.Thread.init(211, &client_process);
+
+    const irq_port = port.create("timer-irq-e2e", &driver_process, &driver_thread) orelse {
+        fail("timer IRQ port creation");
+        return;
+    };
+    const service_port = port.create("timer0-e2e", &driver_process, &driver_thread) orelse {
+        fail("timer service port creation");
+        port.destroy(irq_port);
+        return;
+    };
+    defer {
+        context.setCurrent(null);
+        capability.releaseAll(&driver_process);
+        port.destroyOwnedBy(&driver_process);
+    }
+
+    if (capability.claimIrq(0, &driver_process)) |_| {
+        // The driver is the sole capability owner of IRQ 0; the kernel still
+        // performs its own timer housekeeping before forwarding this copy.
+        if (driver_process.capabilities.grantIrq(0, irq_port.id)) |_| {
+            pass("timer IRQ capability claim");
+        } else |_| {
+            fail("timer IRQ capability claim");
+            return;
+        }
+    } else |_| {
+        fail("timer IRQ capability claim");
+        return;
+    }
+
+    var competing_process = process.Process.init(212, null);
+    if (capability.claimIrq(0, &competing_process)) |_| {
+        fail("timer IRQ exclusivity");
+        capability.releaseIrq(0, &competing_process);
+    } else |_| {
+        pass("timer IRQ exclusivity");
+    }
+
+    // Exercise the same forwarding function used by the IRQ 0 IDT path.
+    if (!idt.forwardIrqToUserspace(0)) {
+        fail("timer IRQ notification forwarding");
+        return;
+    }
+
+    var notification = ipc.Message.init(0);
+    context.setCurrent(&driver_thread);
+    const irq_result = port.receiveResult(irq_port, &notification);
+    if (irq_result.delivered and irq_result.sender == null and
+        notification.tag == 0x49525100 and notification.getData().len == 1 and
+        notification.getData()[0] == 0)
+    {
+        pass("timer IRQ notification over IPC");
+    } else {
+        fail("timer IRQ notification over IPC");
+        return;
+    }
+
+    // Verify the driver's public endpoint uses the normal client-to-server
+    // port contract as well as the private IRQ endpoint.
+    _ = port.connect(service_port, &client_thread) orelse {
+        fail("timer service port connection");
+        return;
+    };
+
+    var request = ipc.Message.init(0x54494D45); // "TIME"
+    request.setData("ticks");
+    context.setCurrent(&client_thread);
+    if (port.send(service_port, &request) != 0) {
+        fail("timer service request");
+        return;
+    }
+
+    context.setCurrent(&driver_thread);
+    var received = ipc.Message.init(0);
+    const request_result = port.receiveResult(service_port, &received);
+    if (request_result.delivered and request_result.sender == &client_thread and
+        received.tag == request.tag and received.getData().len == request.getData().len)
+    {
+        pass("timer service request over IPC");
+    } else {
+        fail("timer service request over IPC");
     }
 }
 

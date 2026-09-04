@@ -10,6 +10,7 @@ const embedded = @import("embedded");
 // Embedded binaries from build system
 pub const init_binary = embedded.init_binary;
 pub const shell_binary = embedded.shell_binary;
+pub const timer_driver_binary = embedded.timer_driver_binary;
 
 /// Register all embedded binaries with the VFS
 pub fn registerAll() void {
@@ -20,6 +21,9 @@ pub fn registerAll() void {
 
     syscall.registerBinary("shell", shell_binary);
     console.log(.debug, "  Registered /shell ({} bytes)", .{shell_binary.len});
+
+    syscall.registerBinary("timer_driver", timer_driver_binary);
+    console.log(.debug, "  Registered /timer_driver ({} bytes)", .{timer_driver_binary.len});
 
     console.log(.info, "Embedded binaries registered", .{});
 }

@@ -6,3 +6,4 @@
 // Embedded ELF binaries (imported anonymously from build output)
 pub const init_binary: []const u8 = @embedFile("init_elf");
 pub const shell_binary: []const u8 = @embedFile("shell_elf");
+pub const timer_driver_binary: []const u8 = @embedFile("timer_driver_elf");

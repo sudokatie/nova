@@ -87,10 +87,29 @@ pub fn build(b: *std.Build) void {
     });
     keyboard_driver_exe.setLinkerScript(b.path("linker_user.ld"));
 
+    // Build the userspace timer driver so its IRQ capability and IPC contract
+    // are checked alongside the keyboard driver.
+    const timer_driver_module = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/timer/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+    });
+    timer_driver_module.addImport("syscall", user_syscall_module);
+
+    const timer_driver_exe = b.addExecutable(.{
+        .name = "timer_driver",
+        .root_module = timer_driver_module,
+    });
+    timer_driver_exe.setLinkerScript(b.path("linker_user.ld"));
+
     // Install user binaries (useful for debugging)
     b.installArtifact(init_exe);
     b.installArtifact(shell_exe);
     b.installArtifact(keyboard_driver_exe);
+    b.installArtifact(timer_driver_exe);
 
     // Create embedded binaries module that includes the user programs
     const embedded_module = b.createModule(.{
@@ -109,6 +128,10 @@ pub fn build(b: *std.Build) void {
     // Embed shell binary from build output
     embedded_module.addAnonymousImport("shell_elf", .{
         .root_source_file = shell_exe.getEmittedBin(),
+    });
+    // Embed the timer driver so init can start it during boot.
+    embedded_module.addAnonymousImport("timer_driver_elf", .{
+        .root_source_file = timer_driver_exe.getEmittedBin(),
     });
 
     // Kernel executable

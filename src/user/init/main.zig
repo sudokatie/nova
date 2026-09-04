@@ -66,7 +66,27 @@ fn startServers() void {
     // Console Server
     libnova.println("  [*] Console server (pending)");
 
+    // APIC timer driver.  The kernel keeps its scheduling tick and forwards
+    // IRQ 0 to this userspace driver through its capability-owned port.
+    startTimerDriver();
+
     libnova.println("Servers started.");
+    libnova.println("");
+}
+
+/// Start the example userspace timer driver.
+fn startTimerDriver() void {
+    const timer_path = "/timer_driver";
+    const timer_pid = syscall.spawn(timer_path, null, null);
+
+    if (timer_pid < 0) {
+        libnova.println("ERROR: Failed to spawn timer driver");
+        return;
+    }
+
+    trackChild(timer_pid, "timer");
+    libnova.print("Timer driver started with PID ");
+    printNumber(timer_pid);
     libnova.println("");
 }
 

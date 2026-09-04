@@ -142,10 +142,10 @@ pub fn sendEoi() void {
     write(APIC_EOI, 0);
 }
 
-/// Timer interrupt handler (called from ISR)
+/// Record a timer interrupt.  The common IDT handler sends the EOI after all
+/// IRQ-specific work, including userspace notification forwarding.
 pub fn timerHandler() void {
     ticks += 1;
-    sendEoi();
 }
 
 /// Get current tick count

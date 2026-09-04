@@ -362,7 +362,7 @@ fn irqSpurious() callconv(.naked) noreturn {
 /// Common ISR stub - saves registers, calls handler, restores and irets
 fn isrCommonStub() callconv(.naked) noreturn {
     asm volatile (
-        // Save all general purpose registers
+    // Save all general purpose registers
         \\pushq %%rax
         \\pushq %%rcx
         \\pushq %%rdx
@@ -415,7 +415,7 @@ fn isrCommonStub() callconv(.naked) noreturn {
 /// Common IRQ stub
 fn irqCommonStub() callconv(.naked) noreturn {
     asm volatile (
-        // Save all general purpose registers
+    // Save all general purpose registers
         \\pushq %%rax
         \\pushq %%rcx
         \\pushq %%rdx
@@ -502,9 +502,13 @@ export fn handleIRQ(vector: u64) void {
 
     switch (vector) {
         32 => {
-            // Timer - always handled by kernel
+            // The kernel always maintains its scheduler/timekeeping tick.
+            // A userspace timer driver may additionally own IRQ 0 and receive
+            // a non-blocking copy of the notification through its port.
+            timer.tick();
             scheduler.tick();
             wakeExpiredSleepers();
+            _ = forwardIrqToUserspace(irq_num);
         },
         33 => {
             // Keyboard - check for userspace driver first
@@ -527,7 +531,7 @@ export fn handleIRQ(vector: u64) void {
 
 /// Forward an IRQ to a userspace driver via IPC
 /// Returns true if the IRQ was claimed by userspace
-fn forwardIrqToUserspace(irq: u8) bool {
+pub fn forwardIrqToUserspace(irq: u8) bool {
     const capability = @import("../../ipc/capability.zig");
     const ipc_message = @import("../../ipc/message.zig");
 
